@@ -2,7 +2,7 @@
 
 > 文档状态：最终方案（实施前评审版）  
 > 目标：在 4 小时内交付一个可运行、可演示、能解决真实问题的纵向 MVP  
-> 技术栈：React、TypeScript、Vite、FastAPI、DuckDB、Polars、SQLGlot、AntV MCP Server Chart、OpenAI-compatible LLM API
+> 技术栈：React、TypeScript、Vite、A2UI v0.9.1、FastAPI、SSE、DuckDB、Polars、SQLGlot、AntV MCP Server Chart、OpenAI-compatible LLM API
 
 ## 1. 执行摘要
 
@@ -79,6 +79,7 @@ MVP 成功不以支持最多文件类型或最多 Agent 为标准，而以一条
 - 基于受控语义上下文的 Text-to-SQL；
 - SQL 只读校验、执行限制和有限修复；
 - KPI、表格、Visualization Agent 自主生成的图表和洞察总结；
+- 基于 A2UI v0.9.1 over SSE 的思考、正文、工具调用和产物流式会话；
 - 可重复执行的 Demo 数据与演示脚本。
 
 ### 3.2 有余量再交付（P1）
@@ -203,11 +204,58 @@ AI 只提供建议，用户确认后才写入 Canonical 层。Demo 中至少要�
 - `UploadDropzone`、`SourceList`；
 - `ProfileSummary`、`MappingTable`、`DataPreview`；
 - `QuestionComposer`、`SuggestedQuestion`；
+- `ConversationView`、`StreamingMessage`、`ReasoningPanel`；
+- `ToolCallGroup`、`ToolCallItem`、`ToolCallDetail`；
+- `MarkdownRenderer`、`SafeImage`、`MermaidDiagram`；
 - `KpiCard`、`InsightCard`、`VisualizationPanel`、`ResultTable`；
 - `SqlDisclosure`、`MetricDisclosure`、`WarningBanner`；
 - `Skeleton`、`EmptyState`、`ErrorState` 和 `Toast`。
 
 桌面端是 Hackathon 的主要演示形态，最小支持宽度为 1,024px；窄屏下侧栏折叠，表格允许横向滚动，但不要求完成完整移动端设计。
+
+### 4.6 流式会话交互规范
+
+Analyze 页面采用连续会话窗口。用户提交问题后，每条 Assistant Message 对应一个 A2UI Surface；浏览器收到 `createSurface` 后立即创建消息容器，再按顺序应用 `updateComponents` 和 `updateDataModel`，不能等待完整回答生成后一次性显示。正文、思考、工具和产物是同一个 Surface Data Model 的不同路径，不定义一套与 A2UI 平行的私有前端事件协议。
+
+#### 思考模块
+
+界面标题使用“思考”。该模块展示的是模型主动输出的用户可见推理摘要、执行计划和进度说明，不是模型供应商隐藏的内部 Chain-of-Thought，也不保存或展示密钥、系统 Prompt、访问令牌等内部信息。
+
+- Data Model 的 `/reasoning/status` 进入 `RUNNING` 时自动展开思考模块；
+- `/reasoning/segments` 可以在正文或工具调用前后持续更新，模块不固定在回答开头；
+- 折叠视图最多占 5 行，并始终显示最新内容，而不是最早的 5 行；
+- 最新 Chunk 到达时更新尾部缓冲并平滑滚动到底部；
+- `/reasoning/status` 进入 `COMPLETED` 后，等待约 300ms 自动收起；
+- 用户可以随时手动展开，查看该回答全部“可见推理摘要/进度”记录；
+- 同一回答出现新的运行中 Segment 时模块再次自动展开，并继续追加到完整记录；
+- 用户手动展开后，不因后续 Segment 完成而强制收起，尊重用户操作。
+
+折叠态使用 `max-height`、渐隐遮罩和“查看完整思考”按钮，不直接截断或删除历史内容。
+
+#### 工具调用模块
+
+工具调用默认折叠，参考 Codex 的紧凑合并交互，但使用本产品自己的视觉 Token：
+
+- 只有一个工具调用时，显示工具的用户可读名称、运行状态和耗时，例如“Query DuckDB”；
+- 点击单工具行直接展开调用详情；
+- 同一 `tool_group_id` 有连续多个工具调用时，显示“已调用 N 个工具”；
+- 点击工具组先展开工具列表；
+- 再点击某个工具项目，展开该工具的输入、输出摘要、耗时、状态和关联产物；
+- 运行中使用低干扰 Spinner，完成显示 Check，失败显示警告图标；
+- 工具详情只展示经过后端脱敏和大小限制的数据，不能显示 API Key、系统 Prompt、完整原始供应商文件或内部堆栈；
+- 并行执行的工具属于同一执行批次时也使用同一个 `tool_group_id`，按开始顺序排列。
+
+工具组不依赖前端根据事件相邻关系进行猜测。后端负责生成稳定的 `tool_call_id`、`tool_group_id` 和 `sequence`。
+工具状态变化时，后端以标准 `updateDataModel` 替换 `/toolGroups/{group_id}` 的完整对象，不发送自定义 `tool.started` 或 `tool.completed` 事件。
+
+#### 正文与产物
+
+- 后端累积正文 Chunk，并以约 50ms 的节流频率用标准 `updateDataModel` 替换 `/content/markdown` 当前值；
+- Markdown、图片、Mermaid、表格和代码块都属于 Assistant Message 的正文区域；
+- `/artifacts` 可以在正文生成过程中加入图片、MCP 图表或其他可视化；
+- 流式未完成的代码围栏不能导致整个消息崩溃；Mermaid 只在围栏闭合且语法可解析后渲染；
+- `/status` 进入 `COMPLETED` 后执行最终 Markdown 渲染、自动收起已完成的思考模块，并持久化消息快照；
+- `/status` 进入 `FAILED` 时保留已经生成的内容，同时给出可重试提示。
 
 ## 5. 端到端处理流程
 
@@ -411,6 +459,12 @@ Profiling 结果和字段词典共同作为 Schema Mapping 的模型上下文。
 | `fact_test_results` | 一次测试尝试的费用、时间、测量值、状态和结果 |
 | `vw_test_results` | 面向 Text-to-SQL 的宽分析视图 |
 | `metric_catalog` | 指标名称、业务定义、SQL 表达式、允许维度和同义词 |
+| `conversations` | 一个用户分析会话 |
+| `messages` | 会话中的 User 或 Assistant 消息 |
+| `message_parts` | 按顺序持久化可见思考摘要、Markdown、工具组和产物引用 |
+| `a2ui_events` | 已校验 A2UI Envelope 的顺序日志，用于重放和审计 |
+| `tool_calls` | 一次工具调用的状态、脱敏输入输出和分组信息 |
+| `artifacts` | 图片、MCP 图表或其他产物的本地元数据 |
 
 ### 8.2 测试事实表关键字段
 
@@ -453,6 +507,11 @@ erDiagram
     DIM_SAMPLES ||--o{ FACT_TEST_RESULTS : receives
     DIM_VENDORS ||--o{ FACT_TEST_RESULTS : performs
     DIM_TESTS ||--o{ FACT_TEST_RESULTS : classifies
+    CONVERSATIONS ||--o{ MESSAGES : contains
+    MESSAGES ||--o{ MESSAGE_PARTS : contains
+    MESSAGES ||--o{ A2UI_EVENTS : streams
+    MESSAGES ||--o{ TOOL_CALLS : executes
+    MESSAGES ||--o{ ARTIFACTS : creates
 
     INGESTION_BATCHES {
         varchar batch_id PK
@@ -507,6 +566,45 @@ erDiagram
         varchar test_id FK
         integer attempt_number
         decimal normalized_cost_usd
+    }
+    CONVERSATIONS {
+        varchar conversation_id PK
+        varchar title
+        timestamp created_at
+        timestamp updated_at
+    }
+    MESSAGES {
+        varchar message_id PK
+        varchar conversation_id FK
+        varchar role
+        varchar status
+        timestamp created_at
+    }
+    MESSAGE_PARTS {
+        varchar part_id PK
+        varchar message_id FK
+        integer sequence
+        varchar part_type
+        json payload
+    }
+    A2UI_EVENTS {
+        varchar event_id PK
+        varchar message_id FK
+        integer sequence
+        json envelope
+    }
+    TOOL_CALLS {
+        varchar tool_call_id PK
+        varchar message_id FK
+        varchar tool_group_id
+        varchar tool_name
+        varchar status
+    }
+    ARTIFACTS {
+        varchar asset_id PK
+        varchar message_id FK
+        varchar artifact_type
+        varchar storage_path
     }
 ```
 
@@ -573,6 +671,43 @@ erDiagram
 - 字段：`display_name`、`description`、`sql_expression`、`format`、`allowed_dimensions`、`synonyms`、`default_time_field`、`version`；
 - 模型只能使用目录中的受批准指标；指标修改需要版本号。
 
+#### `conversations` 与 `messages`
+
+- `conversations` 主键：`conversation_id`；字段：`title`、`created_at`、`updated_at`；
+- `messages` 主键：`message_id`；外键：`conversation_id`；字段：`role`、`status`、`a2ui_surface_snapshot`、`created_at`、`completed_at`、`error_code`；
+- `role` 仅允许 `USER` 和 `ASSISTANT`；
+- `status` 仅允许 `STREAMING`、`COMPLETED`、`FAILED`、`CANCELLED`；
+- User Message 在开始生成前持久化，Assistant Message 在第一个 `createSurface` 发出前创建；完成时保存最终 A2UI Surface 快照。
+
+#### `message_parts`
+
+- 主键：`part_id`；外键：`message_id`；
+- 字段：`sequence`、`part_type`、`segment_id`、`payload`、`created_at`；
+- `part_type` 允许 `REASONING_SUMMARY`、`MARKDOWN`、`TOOL_GROUP`、`ARTIFACT`、`ANALYSIS_RESULT`、`ERROR`；
+- 唯一约束：`(message_id, sequence)`；
+- `REASONING_SUMMARY` 只保存面向用户生成的摘要/进度，不保存模型隐藏推理 Token；
+- 流式 Chunk 可以先在内存中合并，再按 Segment 或完成状态批量持久化，避免每个 Token 写库。
+
+#### `a2ui_events`
+
+- 主键：`event_id`；外键：`message_id`；字段：`sequence`、`envelope`、`created_at`；
+- 唯一约束：`(message_id, sequence)`，只写入已经通过协议与 Catalog 校验的 Envelope；
+- Event ID 对应 SSE `id`，用于 `Last-Event-ID` 重放；消息完成并生成快照后可按保留策略压缩事件日志。
+
+#### `tool_calls`
+
+- 主键：`tool_call_id`；外键：`message_id`；
+- 字段：`tool_group_id`、`sequence`、`tool_name`、`display_name`、`status`、`sanitized_input`、`sanitized_output`、`started_at`、`completed_at`、`duration_ms`、`error_code`；
+- `status` 允许 `PENDING`、`RUNNING`、`COMPLETED`、`FAILED`；
+- 输入输出只能保存经过大小限制和脱敏的副本；模型密钥、系统 Prompt、数据库连接信息不入库。
+
+#### `artifacts`
+
+- 主键：`asset_id`；外键：`message_id`，可选外键：`tool_call_id`；
+- 字段：`artifact_type`、`mime_type`、`storage_path`、`content_hash`、`size_bytes`、`alt_text`、`created_at`；
+- `artifact_type` 允许 `IMAGE`、`MCP_CHART`、`MERMAID_SOURCE`、`DOWNLOAD`；
+- 浏览器只能通过受控 `/api/v1/assets/{asset_id}` 读取，不暴露本地路径。
+
 ### 8.6 数据库模型与 API 模型边界
 
 - 数据库模型为持久化、约束和查询优化服务；
@@ -620,13 +755,17 @@ flowchart TB
     subgraph UI[React + TypeScript Web App]
         U1[Data Sources]
         U2[Schema & Review]
-        U3[Ask & Analyze]
+        U3[Ask & Analyze Shell]
+        U4[A2UI React Renderer]
+        U5[Analytics Chat Catalog]
     end
 
     subgraph API[FastAPI / OpenAPI]
         P1[Ingestion API]
         P2[Schema API]
-        P3[Query API]
+        P3[Conversation API]
+        P4[A2UI SSE Transport]
+        P5[A2UI Validator]
     end
 
     subgraph APP[Python Domain Services]
@@ -636,6 +775,7 @@ flowchart TB
         A4[Text-to-SQL Workflow]
         A5[Visualization Agent & MCP Client]
         A6[Insight Service]
+        A7[Internal Event to A2UI Adapter]
     end
 
     subgraph SAFETY[Validation & Governance]
@@ -662,7 +802,15 @@ flowchart TB
         V3[Local Artifact Cache]
     end
 
-    UI --> API
+    U3 --> U4
+    U4 --> U5
+    U4 <-->|A2UI over SSE / actions| P4
+    U1 --> P1
+    U2 --> P2
+    P3 --> A4
+    A4 --> A7
+    A7 --> P5
+    P5 --> P4
     API --> APP
     APP --> SAFETY
     APP --> DATA
@@ -676,6 +824,9 @@ flowchart TB
 |---|---|---|
 | Python 运行时 | 实施前锁定已验证版本 | 当前项目声明 Python 3.14；正式开工前先对全部依赖做安装和导入冒烟测试，如有兼容问题则立即固定到团队已验证版本，不能在 Hackathon 中临时排查环境问题 |
 | Web 前端 | React + TypeScript + Vite | 支持前后端并行、类型约束和完整产品化界面；无需 SSR，不引入 Next.js 的额外复杂度 |
+| Agent UI 协议 | A2UI v0.9.1 | 使用当前 Production 规范；Agent 生成的会话内容采用标准 Surface、组件树、Data Model 和 Action，不自定义并行协议；v1.0 Candidate 暂不用于四小时交付 |
+| A2UI Renderer | 官方 `@a2ui/react` + 自定义受控 Catalog | 复用官方 React Renderer；固定产品外壳仍由普通 React 实现，仅动态 Assistant Message 使用 A2UI，控制复杂度和安全边界 |
+| 会话流式传输 | A2UI over SSE | FastAPI 以有序 SSE 逐条发送标准 A2UI Envelope；支持服务端到浏览器的思考、正文、工具和产物渐进更新 |
 | 样式方案 | CSS Variables + CSS Modules | 设计 Token 明确、依赖少、可以精确实现 Apple 式视觉；不在四小时内搭建庞大组件库 |
 | API | FastAPI + Pydantic + OpenAPI | Python 技术栈一致，自动校验并输出 OpenAPI；前端可据此生成类型和 Mock |
 | 数据库 | DuckDB | 适合文件接入、聚合和本地 OLAP；零服务部署；比 SQLite 更贴合分析场景 |
@@ -716,6 +867,7 @@ MVP 只有一个分析视图、少量维度和指标，完整语义上下文可�
 
 - API 统一使用 `/api/v1` 前缀；
 - JSON 字段统一使用 `snake_case`，前端不做二次字段改名；
+- A2UI 标准消息、Catalog 和能力元数据保留规范原始字段名，例如 `surfaceId`、`catalogId`、`a2uiClientCapabilities.supportedCatalogIds`，不做 `snake_case` 改写；
 - ID 使用 UUID 字符串；
 - 日期使用 `YYYY-MM-DD`，时间使用 UTC ISO 8601；
 - 状态和结果使用固定大写枚举；
@@ -757,11 +909,16 @@ MVP 只有一个分析视图、少量维度和指标，完整语义上下文可�
 | `POST` | `/api/v1/ingestions/{batch_id}/commit` | `MappingCommitRequest` | `202 IngestionAccepted` | 确认并发布到分析层 |
 | `GET` | `/api/v1/schema/canonical` | 无 | `CanonicalSchemaResponse` | 前端显示标准字段词典 |
 | `GET` | `/api/v1/metrics` | 无 | `MetricCatalogResponse` | 显示指标口径 |
-| `POST` | `/api/v1/queries` | `QueryRequest` | `QueryResponse` | 自然语言分析 |
-| `GET` | `/api/v1/queries/suggestions` | 无 | `QuerySuggestionResponse` | 获取固定示例问题 |
+| `POST` | `/api/v1/conversations` | `CreateConversationRequest` | `Conversation` | 创建分析会话 |
+| `GET` | `/api/v1/conversations/{conversation_id}` | Path ID | `Conversation` | 获取会话元数据 |
+| `GET` | `/api/v1/conversations/{conversation_id}/messages` | 分页 | `MessageListResponse` | 恢复会话和最终 A2UI 快照 |
+| `POST` | `/api/v1/conversations/{conversation_id}/messages/stream` | `CreateMessageRequest` | `text/event-stream` | 发送问题并流式返回标准 A2UI Envelope |
+| `POST` | `/api/v1/conversations/{conversation_id}/a2ui/actions` | A2UI `action` Message | `202 Accepted` | 处理重试、推荐问题、服务端筛选等动作 |
+| `POST` | `/api/v1/conversations/{conversation_id}/messages/{message_id}/cancel` | 无 | `202 Accepted` | 取消仍在运行的回答 |
+| `GET` | `/api/v1/analysis/suggestions` | 无 | `QuerySuggestionResponse` | 获取固定示例问题 |
 | `GET` | `/api/v1/assets/{asset_id}` | Path ID | 图片文件 | 同源读取已缓存的 MCP 图表资产 |
 
-P0 不实现删除数据接口，避免 Demo 误操作。查询接口在 MVP 中同步返回，前端设置 60 秒超时并展示“理解问题、生成查询、分析结果”的阶段状态；流式响应和 SSE 属于 P1。
+P0 不实现删除数据接口，避免 Demo 误操作。会话生成是 P0 流式能力：前端对 `messages/stream` 使用 Fetch 读取 SSE，以便通过 `POST` 同时提交问题和客户端能力；连接中断可以依据 SSE `id` 和 `Last-Event-ID` 恢复，服务端按顺序重放该消息尚未确认的 A2UI Envelope。固定资源与数据接入接口仍使用普通 JSON HTTP。
 
 ### 10.9 共享数据模型
 
@@ -799,6 +956,8 @@ P0 不实现删除数据接口，避免 Demo 误操作。查询接口在 MVP 中
 | `CanonicalSchemaResponse` | Canonical 字段名、类型、必填性、说明、枚举和样例 |
 | `MetricCatalogResponse` | 指标 Key、名称、定义、格式、允许维度和同义词 |
 | `QuerySuggestionResponse` | `items: {id, label, question, category}[]` |
+| `Conversation` | `conversation_id`、`title`、`created_at`、`updated_at` |
+| `MessageListResponse` | `items: MessageSnapshot[]`、`total`、`page`、`page_size`；每条 Assistant Message 含最终 A2UI Surface 快照 |
 
 #### ColumnProfile
 
@@ -839,7 +998,7 @@ P0 不实现删除数据接口，避免 Demo 误操作。查询接口在 MVP 中
 - `warnings`；
 - `changed_fields`：列出经过转换的 Canonical 字段。
 
-#### QueryRequest
+#### CreateMessageRequest
 
 ```json
 {
@@ -850,18 +1009,21 @@ P0 不实现删除数据接口，避免 Demo 误操作。查询接口在 MVP 中
     "project_ids": [],
     "vendor_ids": []
   },
-  "conversation_id": null,
-  "include_sql": true
+  "a2uiClientCapabilities": {
+    "supportedCatalogIds": [
+      "https://mini-hackathon.local/a2ui/catalogs/analytics-chat/v1"
+    ]
+  }
 }
 ```
 
-`question` 长度限制为 1–1,000 字符；前端筛选器是显式条件，后端必须将其与自然语言问题共同应用并在响应中回显。
+`question` 长度限制为 1–1,000 字符；前端筛选器是显式条件，后端必须将其与自然语言问题共同应用并在 Surface Data Model 中回显。客户端必须声明支持的 Catalog ID；服务端在创建 Surface 前完成协商，不支持时返回 `A2UI_CATALOG_UNSUPPORTED`，不能悄悄降级为未知组件。
 
-#### QueryResponse
+#### AnalysisResult（A2UI Data Model 中的最终分析快照）
 
 ```json
 {
-  "query_id": "uuid",
+  "analysis_id": "uuid",
   "answer": "Vendor B has the lowest average cost but the longest turnaround time.",
   "kpis": [
     {
@@ -900,11 +1062,12 @@ P0 不实现删除数据接口，避免 Demo 误操作。查询接口在 MVP 中
   "applied_filters": {},
   "warnings": [],
   "execution_ms": 842,
-  "request_id": "uuid"
+  "request_id": "uuid",
+  "status": "COMPLETED"
 }
 ```
 
-`VisualizationArtifact.status` 允许 `READY`、`SKIPPED` 和 `FAILED`。`tool_name` 记录 Agent 实际选择的 MCP 工具；`asset_url` 只能是本产品同源的 `/api/v1/assets/{asset_id}`，不能把第三方 URL 直接透传给浏览器。`alt_text` 用于无障碍和图表加载失败时的解释，`rationale` 说明 Agent 为什么选择该可视化，但不作为业务事实。
+该对象不是 `messages/stream` 的单次同步 HTTP 响应，而是随 `updateDataModel` 渐进形成并在完成后持久化的最终业务快照。`VisualizationArtifact.status` 允许 `READY`、`SKIPPED` 和 `FAILED`。`tool_name` 记录 Agent 实际选择的 MCP 工具；`asset_url` 只能是本产品同源的 `/api/v1/assets/{asset_id}`，不能把第三方 URL 直接透传给浏览器。`alt_text` 用于无障碍和图表加载失败时的解释，`rationale` 说明 Agent 为什么选择该可视化，但不作为业务事实。
 
 #### ErrorResponse
 
@@ -920,23 +1083,113 @@ P0 不实现删除数据接口，避免 Demo 误操作。查询接口在 MVP 中
 }
 ```
 
-常用错误码包括 `UNSUPPORTED_FILE_TYPE`、`INGESTION_FAILED`、`MAPPING_NOT_READY`、`MAPPING_VALIDATION_FAILED`、`QUERY_OUT_OF_SCOPE`、`SQL_REJECTED`、`QUERY_TIMEOUT`、`MODEL_UNAVAILABLE`、`MCP_UNAVAILABLE`、`MCP_TIMEOUT`、`ASSET_FETCH_REJECTED` 和 `INTERNAL_ERROR`。
+常用错误码包括 `UNSUPPORTED_FILE_TYPE`、`INGESTION_FAILED`、`MAPPING_NOT_READY`、`MAPPING_VALIDATION_FAILED`、`QUERY_OUT_OF_SCOPE`、`SQL_REJECTED`、`QUERY_TIMEOUT`、`MODEL_UNAVAILABLE`、`A2UI_CATALOG_UNSUPPORTED`、`A2UI_VALIDATION_FAILED`、`MCP_UNAVAILABLE`、`MCP_TIMEOUT`、`ASSET_FETCH_REJECTED` 和 `INTERNAL_ERROR`。
 
-### 10.10 前端并行开发约定
+### 10.10 A2UI 协议边界与 Surface 生命周期
+
+本项目锁定 **A2UI v0.9.1 Current Production**。v1.0 仍是 Candidate，四小时交付不承担候选协议和 Renderer 支持尚未稳定的风险。A2UI 只负责 Agent 生成的 Assistant Message；顶栏、导航、Sources、Schema Review、问题输入框和会话列表属于确定性产品外壳，继续使用普通 React 组件。
+
+每条 Assistant Message 使用唯一 `surfaceId = "message:{message_id}"`，固定使用 Catalog ID：
+
+```text
+https://mini-hackathon.local/a2ui/catalogs/analytics-chat/v1
+```
+
+消息生命周期严格遵循：
+
+1. `createSurface`：声明 `version: "v0.9.1"`、`surfaceId`、`catalogId` 和主题；
+2. `updateComponents`：以扁平邻接表定义 `root` 和全部组件，组件可以先于绑定数据到达；
+3. `updateDataModel`：按 JSON Pointer 替换思考、正文、工具、图表和分析结果；
+4. `deleteSurface`：仅在用户删除消息或重新生成并移除旧消息时发送，完成回答不删除 Surface。
+
+`surfaceId` 和 `catalogId` 创建后不可修改。组件结构在消息开始阶段一次定义，流式阶段优先只更新 Data Model，避免每个 Token 重发组件树。
+
+为保证四小时内的正确性，P0 采用“确定性 A2UI 组件模板 + Agent 驱动数据”的方式：后端从版本化模板生成 Assistant Message 的组件邻接表，Agent 决定回答内容、工具调用和可视化，`A2UIAdapter` 负责绑定和更新数据。模型不直接自由生成任意组件树。后续需要真正的动态布局时，再在同一 Catalog 与 Validator 边界内开放受控的 `updateComponents` 生成。
+
+### 10.11 A2UI over SSE 传输约定
+
+`messages/stream` 返回 `Content-Type: text/event-stream`。每个 SSE Event 的 `data` 必须是一个完整、未经业务 Envelope 二次包裹、能独立通过 A2UI v0.9.1 Schema 校验的 JSON 对象；Event 按生成顺序交付。`id` 只用于断线恢复，`event: a2ui` 只用于 SSE 分帧，两者不进入 A2UI JSON。
+
+```text
+id: 1
+event: a2ui
+data: {"version":"v0.9.1","createSurface":{"surfaceId":"message:msg_123","catalogId":"https://mini-hackathon.local/a2ui/catalogs/analytics-chat/v1","theme":{"primaryColor":"#007AFF"},"sendDataModel":false}}
+
+id: 2
+event: a2ui
+data: {"version":"v0.9.1","updateComponents":{"surfaceId":"message:msg_123","components":[{"id":"root","component":"Column","children":["reasoning","answer"]},{"id":"reasoning","component":"ReasoningPanel","segments":{"path":"/reasoning/segments"},"status":{"path":"/reasoning/status"}},{"id":"answer","component":"RichMarkdown","markdown":{"path":"/content/markdown"}}]}}
+
+id: 3
+event: a2ui
+data: {"version":"v0.9.1","updateDataModel":{"surfaceId":"message:msg_123","path":"/","value":{"reasoning":{"segments":[],"status":"IDLE"},"content":{"markdown":""},"toolGroups":{},"artifacts":[],"analysis":{},"status":"STREAMING"}}}
+
+id: 4
+event: a2ui
+data: {"version":"v0.9.1","updateDataModel":{"surfaceId":"message:msg_123","path":"/content/markdown","value":"Vendor B has the lowest average cost"}}
+```
+
+FastAPI 发送 Keepalive Ping，关闭代理缓冲并设置禁止缓存。首次请求携带 `Idempotency-Key`；后端为单条消息保存递增 Event ID 和已验证 Envelope。客户端断线后使用同一 `Idempotency-Key` 重新 `POST` 并提交 `Last-Event-ID`，服务端定位原消息，先按顺序重放缺失消息，再继续实时流；客户端对重复 Event ID 幂等忽略。
+
+模型 Provider 的内部流先归一化为后端领域事件，例如可见思考摘要、正文 Chunk、工具状态和产物状态；`A2UIAdapter` 负责累积文本，并以约 50ms 的节流频率发送当前路径的完整值。A2UI `updateDataModel` 是“替换指定路径”，不能伪造 `append` 或 `delta` 类型。
+
+### 10.12 Analytics Chat Catalog
+
+自定义 Catalog 基于 A2UI Basic Catalog 的结构和类型定义，保留足够的标准组件，并增加分析会话需要的受控组件：
+
+| Catalog 组件 | 用途 | 关键绑定 |
+|---|---|---|
+| `Column`、`Row`、`Card`、`Text`、`Image`、`Button` | 通用布局、文案、图片和服务端动作 | 使用 Basic Catalog 语义 |
+| `ReasoningPanel` | 最新 5 行、完整记录、运行状态和自动收起 | `/reasoning/segments`、`/reasoning/status` |
+| `ToolCallGroup` | 单工具直显、多工具合并、列表和详情 | `/toolGroups/{group_id}` |
+| `RichMarkdown` | GFM Markdown、代码块、图片和 Mermaid 分派 | `/content/markdown` |
+| `VisualizationArtifact` | AntV MCP 图表、状态、理由和无障碍文本 | `/artifacts` |
+| `KpiGrid` | KPI 卡片集合 | `/analysis/kpis` |
+| `DataTable` | 截断提示、列定义和分析结果行 | `/analysis/table` |
+
+Catalog Schema 必须保存在代码库并由前后端共享。所有子组件引用使用 A2UI `ComponentId`，子列表使用 `ChildList`，不能用普通字符串绕过树完整性验证。Agent 只能选择 Catalog 中存在的组件和属性，不能下发 JavaScript、任意 HTML、CSS、事件处理代码或第三方组件 URL。
+
+Surface Data Model 至少包含以下稳定路径：
+
+```text
+/reasoning/segments
+/reasoning/status
+/content/markdown
+/toolGroups/{group_id}
+/artifacts
+/analysis
+/status
+```
+
+思考面板的手动展开、工具详情展开等纯展示状态留在 Renderer 本地；新的运行中 Segment 可以触发本地自动展开。重试、应用筛选、执行推荐问题等需要服务端参与的交互，使用标准 A2UI `action` 消息，其字段为 `name`、`surfaceId`、`sourceComponentId`、`timestamp` 和 `context`。
+
+### 10.13 富文本、安全与协议校验
+
+`RichMarkdown` 使用 `react-markdown`、`remark-gfm` 和 `rehype-sanitize`。默认禁用 Raw HTML，并为以下内容提供受控 Renderer：
+
+- 图片只允许同源 `/api/v1/assets/{asset_id}` 或显式 HTTPS Allowlist；必须有 `alt`，使用懒加载、失败占位和点击放大；
+- `mermaid` 围栏只在闭合且可解析后渲染，使用 `startOnLoad: false`、`securityLevel: "strict"`，禁止 Click Directive，并对输出 SVG 再做清理；失败时显示错误提示和源代码；
+- 普通代码块转义显示，不执行；外链添加安全属性；超大 Markdown、图片和表格按统一上限截断并提示；
+- AntV MCP 的外部资源先由后端下载、校验 MIME/大小/域名并缓存，再以同源资产交给 `Image` 或 `VisualizationArtifact`。
+
+后端在发送每个 Envelope 前，先按 A2UI v0.9.1 `server_to_client` Schema 与选定 Catalog Schema 校验，再检查 Surface 生命周期、Component ID 唯一性、引用完整性、JSON Pointer 和资源策略。无效消息不能进入 SSE；适配器使用标准 `VALIDATION_FAILED` 错误结构反馈给生成环节并进行一次受限修复，仍失败则把 `/status` 更新为 `FAILED`，保留已通过校验的内容。
+
+历史消息保存最终 A2UI Surface 快照和结构化业务快照，恢复时不重新调用模型。数据库中的 `message_parts` 与 `tool_calls` 是审计和恢复模型，不是另一套浏览器协议。
+
+### 10.14 前端并行开发约定
 
 1. 先提交 `openapi.yaml`、枚举和三组 Golden JSON；
 2. 前端从 OpenAPI 生成只读 TypeScript 类型和 API Client，不手写重复 DTO；
-3. 前端通过 Mock Service Worker 模拟 `NEEDS_REVIEW`、`READY`、空数据和失败状态；
-4. 后端使用相同 Golden JSON 做响应模型测试；
+3. 前端通过 Mock Service Worker 模拟 `NEEDS_REVIEW`、`READY`、空数据和失败状态，并提供按时间顺序输出的 A2UI SSE Fixture；
+4. 后端使用相同 Golden JSON 和 A2UI Envelope Fixture 做响应模型测试；
 5. 联调时关闭 Mock，将 `VITE_API_BASE_URL` 指向 FastAPI；
-6. CI 或本地检查必须验证 OpenAPI 能生成客户端、Pydantic 响应符合契约；
+6. CI 或本地检查必须验证 OpenAPI 能生成客户端、Pydantic 响应符合契约、全部 A2UI Fixture 通过 v0.9.1 与 Catalog Schema；
 7. 前端不得依赖数据库列名，也不得直接调用 MCP；所有 MCP 工具调用、外部 URL 处理和图表缓存均由后端负责。
 
 必须预先准备以下 Mock 场景：
 
 - Sources 列表包含 Ready、Needs Review 和 Failed；
 - Mapping 页面包含高置信度、低置信度、忽略字段和转换警告；
-- Analyze 页面包含 KPI、MCP 图表资产、洞察、SQL 和数据质量警告；
+- Analyze 页面包含完整 A2UI Surface 流，覆盖思考分段、单工具、多工具组、Markdown、图片、Mermaid、KPI、MCP 图表资产、洞察、SQL 和数据质量警告；
 - 查询无结果；
 - 模型暂时不可用。
 
@@ -1067,10 +1320,11 @@ DeepSeek 和 Kimi 通过 OpenAI-compatible API 接入。模型调用层不直接
 
 - `generate_structured(...)`
 - `generate_text(...)`
+- `stream(...)`
 - `generate_tool_call(context, tool_schemas)`
 - 可选的 `extract_from_image(...)`
 
-Schema Mapping 和 Text-to-SQL 都要求结构化输出，并在应用侧做 Schema 校验和失败重试。Visualization Agent 使用 `generate_tool_call(...)` 从 MCP 动态工具 Schema 中选择工具；模型只产生 Tool Call，实际 MCP 连接、调用、超时和资源下载始终由后端执行。模型 Provider 原生 Tool Calling 格式的差异由 `ModelClient` 适配层屏蔽。
+Schema Mapping 和 Text-to-SQL 都要求结构化输出，并在应用侧做 Schema 校验和失败重试。`stream(...)` 将不同 Provider 的可见思考摘要、正文、工具请求和完成状态归一化为内部领域事件，再由 `A2UIAdapter` 转为标准 A2UI 消息；Provider 隐藏的 Chain-of-Thought 不采集、不持久化、不对外展示。Visualization Agent 使用 `generate_tool_call(...)` 从 MCP 动态工具 Schema 中选择工具；模型只产生 Tool Call，实际 MCP 连接、调用、超时和资源下载始终由后端执行。模型 Provider 原生 Tool Calling 格式的差异由 `ModelClient` 适配层屏蔽。
 
 ### 13.2 上线后迁移 Gemini
 
@@ -1121,13 +1375,22 @@ OpenAI-compatible 协议不能被当作永久业务接口。内部 `ModelClient`
 ```text
 mini-hackathon/
 ├── contracts/
-│   ├── openapi.yaml          # 前后端唯一接口契约
-│   └── examples/             # Golden JSON 和 Mock 场景
+│   ├── openapi.yaml                  # 普通 HTTP 与流式端点契约
+│   ├── a2ui/
+│   │   ├── v0.9.1/                   # 锁定的 A2UI 协议 Schema
+│   │   └── catalogs/
+│   │       └── analytics-chat-v1.json
+│   └── examples/                     # Golden JSON、A2UI Stream 和 Mock 场景
 ├── frontend/
 │   ├── package.json
 │   ├── vite.config.ts
 │   └── src/
 │       ├── api/              # OpenAPI 生成的 Client 和类型
+│       ├── a2ui/
+│       │   ├── catalog.ts    # 自定义 Catalog 注册
+│       │   ├── stream.ts     # SSE 分帧、恢复和幂等处理
+│       │   ├── components/   # Reasoning、Tools、Markdown、Artifact
+│       │   └── renderers/    # SafeImage、Mermaid 等受控 Renderer
 │       ├── components/       # 通用产品组件
 │       ├── features/         # sources、mapping、analyze
 │       ├── mocks/            # Mock Service Worker
@@ -1146,6 +1409,9 @@ mini-hackathon/
 │   │   │   ├── normalization.py
 │   │   │   ├── semantic.py
 │   │   │   ├── text_to_sql.py
+│   │   │   ├── streaming.py
+│   │   │   ├── a2ui_adapter.py
+│   │   │   ├── a2ui_validator.py
 │   │   │   ├── visualization_agent.py
 │   │   │   ├── mcp_chart.py
 │   │   │   └── insights.py
@@ -1163,6 +1429,8 @@ mini-hackathon/
 │       ├── test_mapping.py
 │       ├── test_metrics.py
 │       ├── test_sql_guard.py
+│       ├── test_a2ui_protocol.py
+│       ├── test_a2ui_stream_order.py
 │       └── test_visualization_mcp.py
 ├── data/
 │   ├── demo/                 # 可重复生成的原始 Demo 数据
@@ -1197,8 +1465,9 @@ mini-hackathon/
 共同完成：
 
 - 固化 Canonical Schema、指标、Demo 故事和 API 枚举；
-- 创建 `openapi.yaml` 和三组 Golden JSON；
-- 前端生成 TypeScript Client，后端生成或编写 Pydantic Model；
+- 锁定 A2UI v0.9.1 Schema、`analytics-chat-v1` Catalog 和 Surface Data Model；
+- 创建 `openapi.yaml`、A2UI 流 Fixture 和三组 Golden JSON；
+- 前端生成 TypeScript Client 并注册 Catalog，后端生成或编写 Pydantic Model 与 A2UI Validator；
 - 完成 Python、Node、AntV MCP Server Chart 和关键依赖冒烟测试；
 - 验证 MCP `tools/list`、一次工具调用和图表资产下载；
 - 确认 Apple 风格 Token 和页面路由。
@@ -1213,6 +1482,7 @@ mini-hackathon/
 - 完成 Sources 列表、上传和状态展示；
 - 完成 Mapping Table、数据预览和确认交互；
 - 完成 Analyze 页面、KPI、MCP 图表资产、结果表、SQL 展开和异常状态；
+- 接入 `@a2ui/react`，完成流式 Surface、思考面板、工具组、Markdown、图片和 Mermaid Renderer；
 - 使用 Mock 覆盖 Ready、Needs Review、Failed 和 Empty。
 
 #### Backend 轨道
@@ -1221,14 +1491,15 @@ mini-hackathon/
 - 实现 CSV/Excel/文本接入、Profiling 和状态机；
 - 实现结构化 Mapping、标准化、Preview 和 Commit；
 - 实现 Metric Catalog、Text-to-SQL、SQLGlot Guard 和查询执行；
-- 启动 AntV MCP Server Chart 并实现 MCP Client、Visualization Agent、资产缓存和 QueryResponse 组装；
+- 启动 AntV MCP Server Chart 并实现 MCP Client、Visualization Agent、资产缓存和 AnalysisResult 组装；
+- 实现内部流事件、A2UI Adapter、Schema/Catalog 校验、SSE 顺序交付与断线重放；
 - 实现模型适配以及 MCP 超时后的非阻断降级。
 
 #### Data/QA 轨道（如有人力）
 
 - 验证预埋洞察和参考 SQL；
 - 维护 Mock 与真实 API 的 Golden JSON；
-- 编写指标、Mapping 和 SQL Guard 测试；
+- 编写指标、Mapping、SQL Guard、A2UI Schema 和流顺序测试；
 - 准备 Demo 文本、异常文件和演示问题。
 
 **退出条件：** 前端对 Mock 已完整可用，后端通过 API 测试完成同一纵向链路。
@@ -1237,8 +1508,9 @@ mini-hackathon/
 
 - 前端关闭 Mock，连接 FastAPI；
 - 修复唯一允许优先处理的问题：契约不一致、主流程阻断、结果错误；
-- 验证上传、轮询、Review、Commit、Query 全链路；
-- 验证 Agent 能针对不同问题自主选择不同 MCP Tool，并通过真实 QueryResponse 展示图表资产；
+- 验证上传、轮询、Review、Commit、Conversation/A2UI Stream 全链路；
+- 验证 Agent 能针对不同问题自主选择不同 MCP Tool，并通过真实 A2UI Surface 展示图表资产；
+- 验证思考最新 5 行、完成自动收起、单/多工具合并、Markdown、图片和 Mermaid；
 - 构建前端并由 FastAPI 托管静态文件。
 
 **退出条件：** 用户通过同一浏览器地址完成完整流程，Swagger 与前端实际使用的字段一致。
@@ -1298,6 +1570,12 @@ CSV/Excel、文本、映射确认、统一数据、Text-to-SQL、SQL Guard 和 M
 - [ ] 查询结果能生成合适的 KPI、MCP 图表资产和总结；
 - [ ] MCP 超时或失败时仍返回 KPI、表格和洞察；
 - [ ] 用户能查看 SQL、指标定义和筛选条件。
+- [ ] Assistant Message 通过 A2UI v0.9.1 Surface 流式显示，不存在自定义平行 UI 线协议；
+- [ ] 每个服务端 A2UI Envelope 均通过协议 Schema 和 `analytics-chat-v1` Catalog 校验；
+- [ ] 思考模块最多显示最新 5 行，完成后自动收起，用户可展开全部可见进度记录；
+- [ ] 单工具显示工具名，连续多工具合并计数，并可逐层展开脱敏详情；
+- [ ] GFM Markdown、同源图片和 Mermaid 正确渲染，非法 HTML、脚本和资源 URL 被拒绝；
+- [ ] SSE 断线重连不会重复或乱序应用 A2UI 消息，已生成内容不会丢失。
 
 ### 18.2 正确性验收
 
@@ -1324,6 +1602,9 @@ CSV/Excel、文本、映射确认、统一数据、Text-to-SQL、SQL Guard 和 M
 | 文本数据缺乏上下文 | 字段无法可靠推断 | 展示低置信度并要求人工确认 |
 | 四小时范围过大 | 主流程未完成 | 严格按 P0/P1 和降级顺序执行 |
 | 前后端并行产生契约漂移 | 联调阶段集中失败 | OpenAPI-first、生成 Client、Golden JSON 和 Contract Test |
+| A2UI 组件或消息不符合协议 | 消息无法渲染或客户端状态损坏 | 锁定 v0.9.1、共享 Catalog、服务端发送前双重 Schema 校验、流顺序测试 |
+| 流式连接中断或代理缓冲 | 页面长时间无更新或内容重复 | SSE Keepalive、关闭缓冲、Event ID、`Last-Event-ID` 重放与客户端幂等 |
+| Markdown / Mermaid / 图片包含不安全内容 | XSS 或非预期外部请求 | 禁用 Raw HTML、Sanitize、Mermaid Strict、同源资产代理和 URL Allowlist |
 | Agent 选择的图表不合适 | 演示效果差 | 提供清晰的分析目标、指标语义、Tool Schema 和 Golden Case 评测，不用固定规则替代 Agent |
 | MCP 或公共渲染服务不可用 | 图表无法生成 | 独立超时、健康检查、同源资产缓存；失败时保留 KPI、表格和洞察 |
 | 企业数据发送到外部渲染服务 | 数据泄露 | Demo 只使用合成数据；真实数据强制配置私有 `VIS_REQUEST_SERVER` 并只发送脱敏聚合结果 |
@@ -1341,8 +1622,8 @@ Hackathon 结束时交付：
 4. 一套可审阅的 Canonical Schema、字段映射和 Metric Catalog；
 5. 一个受控的 Text-to-SQL、Visualization Agent、AntV MCP 图表和洞察流程；
 6. 一个 DeepSeek/Kimi 模型适配器，并为 Gemini 迁移保留接口；
-7. 一份 OpenAPI 契约、生成的 TypeScript Client 和可复用 Mock 数据；
-8. 一个 FastAPI 后端以及自动化的接口、指标、映射、SQL Guard 和 MCP 集成测试；
+7. 一份 OpenAPI 契约、A2UI v0.9.1 Schema、自定义 Analytics Chat Catalog、生成的 TypeScript Client 和可复用 Mock Stream；
+8. 一个 FastAPI 后端以及自动化的接口、A2UI 流、指标、映射、SQL Guard 和 MCP 集成测试；
 9. 一个本地 AntV MCP Server Chart Runtime、配置和图表资产缓存；
 10. 本文档、启动说明和 4–6 分钟 Demo 脚本。
 
@@ -1353,6 +1634,7 @@ Hackathon 结束时交付：
 ### Phase 1：当前 Hackathon
 
 - React 产品前端与 Apple 式视觉系统；
+- A2UI v0.9.1 会话 Surface、官方 React Renderer 和自定义 Analytics Chat Catalog；
 - FastAPI 和版本化 OpenAPI 契约；
 - 本地多源接入；
 - 人工确认的 Schema Mapping；
@@ -1366,7 +1648,7 @@ Hackathon 结束时交付：
 - 用户权限和查询历史；
 - 数据质量看板；
 - Gemini 模型适配；
-- 可靠后台任务队列和流式查询进度。
+- 可靠后台任务队列和跨 Worker 的流式会话恢复。
 
 ### Phase 3：生产化
 
@@ -1390,6 +1672,9 @@ Hackathon 结束时交付：
 | 本地数据库 | DuckDB |
 | UI | React + TypeScript + Vite，Apple 式设计系统 |
 | API | FastAPI + Pydantic + OpenAPI，统一 `/api/v1` |
+| Agent UI 协议 | A2UI v0.9.1 Current Production；每条 Assistant Message 一个 Surface |
+| A2UI Renderer | 官方 `@a2ui/react` + 受控 `analytics-chat-v1` Catalog |
+| 流式传输 | 有序 A2UI Envelope over SSE；Event ID 支持断线重放，标准 A2UI Action 独立回传 |
 | 前后端协作 | OpenAPI-first、生成 TypeScript Client、Mock Service Worker |
 | 数据处理 | Polars |
 | SQL 防护 | SQLGlot + 应用层白名单和执行限制 |
@@ -1412,6 +1697,13 @@ Hackathon 结束时交付：
 - [Vite Getting Started and Production Build](https://vite.dev/guide/)
 - [FastAPI Features and OpenAPI](https://fastapi.tiangolo.com/features/)
 - [FastAPI Static Files](https://fastapi.tiangolo.com/tutorial/static-files/)
+- [FastAPI Server-Sent Events](https://fastapi.tiangolo.com/tutorial/server-sent-events/)
+- [A2UI v0.9.1 Protocol](https://a2ui.org/specification/v0.9.1-a2ui/)
+- [A2UI Client Setup and React Renderer](https://a2ui.org/guides/client-setup/)
+- [A2UI Renderer Reference](https://a2ui.org/reference/renderers/)
+- [A2UI Custom Catalog Guide](https://a2ui.org/guides/defining-your-own-catalog/)
+- [react-markdown](https://github.com/remarkjs/react-markdown)
+- [Mermaid Usage and Security Configuration](https://mermaid.js.org/config/usage.html)
 - [AntV MCP Server Chart](https://github.com/antvis/mcp-server-chart)
 - [DuckDB Python API](https://duckdb.org/docs/stable/clients/python/overview)
 - [DuckDB CSV Import](https://duckdb.org/docs/stable/data/csv/overview)
