@@ -77,7 +77,7 @@ export default function App() {
 
         {page === 'sources' && <SourcesPage sources={sources} refresh={refreshSources} openReview={openReview} />}
         {page === 'schema' && <SchemaPage sources={sources} batchId={selectedBatch} onCommitted={refreshSources} onAnalyze={() => setPage('analyze')} />}
-        {page === 'analyze' && <AnalyzePage />}
+        <div hidden={page !== 'analyze'}><AnalyzePage /></div>
       </main>
     </div>
   )
@@ -188,30 +188,69 @@ function SchemaPage({ sources, batchId, onCommitted, onAnalyze }: { sources: Ing
 }
 
 function AnalyzePage() {
-  const [conversationId, setConversationId] = useState<string | null>(null)
-  const [turns, setTurns] = useState<string[]>([])
-  const [queryRunning, setQueryRunning] = useState(false)
-  const queryRunningRef = useRef(false)
+  type Session = { id: string; title: string; turns: string[]; running: boolean }
+  const [sessions, setSessions] = useState<Session[]>([])
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
+  const [creatingSession, setCreatingSession] = useState(false)
+  const runningRefs = useRef(new Map<string, boolean>())
+  const initializedRef = useRef(false)
   const suggestions = useMemo(() => [
     'Compare cost, pass rate and turnaround time by vendor',
     'What cost trends or anomalies appeared in recent months?',
     'Which materials have the highest failure rate?',
   ], [])
-  useEffect(() => { void api.createConversation().then((value) => setConversationId(value.conversation_id)) }, [])
-  const setRunning = (running: boolean) => {
-    queryRunningRef.current = running
-    setQueryRunning(running)
+  useEffect(() => {
+    if (initializedRef.current) return
+    initializedRef.current = true
+    void api.createConversation().then((value) => {
+      const session = { id: value.conversation_id, title: 'New analysis', turns: [], running: false }
+      setSessions([session])
+      setActiveSessionId(session.id)
+    })
+  }, [])
+
+  const createSession = async () => {
+    if (creatingSession) return
+    setCreatingSession(true)
+    try {
+      const value = await api.createConversation()
+      const session = { id: value.conversation_id, title: 'New analysis', turns: [], running: false }
+      setSessions((current) => [...current, session])
+      setActiveSessionId(session.id)
+    } finally {
+      setCreatingSession(false)
+    }
   }
-  const ask = (value: string) => {
-    if (!value.trim() || !conversationId || queryRunningRef.current) return
-    setRunning(true)
-    setTurns((current) => [...current, value.trim()])
+
+  const setRunning = (sessionId: string, running: boolean) => {
+    runningRefs.current.set(sessionId, running)
+    setSessions((current) => current.map((session) => session.id === sessionId ? { ...session, running } : session))
   }
+
+  const ask = (sessionId: string, value: string) => {
+    const question = value.trim()
+    if (!question || runningRefs.current.get(sessionId)) return
+    runningRefs.current.set(sessionId, true)
+    setSessions((current) => current.map((session) => session.id === sessionId ? {
+      ...session,
+      title: session.turns.length ? session.title : question.slice(0, 38),
+      turns: [...session.turns, question],
+      running: true,
+    } : session))
+  }
+
   return <div className="page analyze-page">
     <section className="analyze-hero"><div><span className="eyebrow">ASK & ANALYZE</span><h1>What would you like to understand?</h1><p>Ask across every trusted source. Prism will show its work, use the right tools, and surface the decision—not just the numbers.</p></div></section>
-    {!turns.length && <div className="suggestion-grid">{suggestions.map((item, index) => <button key={item} onClick={() => ask(item)}><span className={`suggestion-icon s${index}`}><LayoutDashboard size={18} /></span><strong>{['Compare vendor performance','Find recent anomalies','Inspect quality risk'][index]}</strong><small>{item}</small><ArrowRight size={16} /></button>)}</div>}
-    {conversationId && turns.map((turn, index) => <div className="conversation" key={`${index}-${turn}`}><div className="user-message">{turn}</div><A2UIConversation conversationId={conversationId} question={turn} onStreamingChange={index === turns.length - 1 ? setRunning : undefined} /></div>)}
-    <QuestionComposer enabled={Boolean(conversationId) && !queryRunning} running={queryRunning} onSubmit={ask} />
+    <section className="session-switcher" aria-label="Analysis conversations">
+      <div className="session-tabs">{sessions.map((session, index) => <button key={session.id} className={activeSessionId === session.id ? 'active' : ''} onClick={() => setActiveSessionId(session.id)}><span className={session.running ? 'session-state running' : 'session-state'} /> <strong>{session.title}</strong><small>{session.running ? 'Running' : session.turns.length ? `${session.turns.length} question${session.turns.length === 1 ? '' : 's'}` : `Conversation ${index + 1}`}</small></button>)}</div>
+      <button className="new-session-button" onClick={() => void createSession()} disabled={creatingSession}><Plus size={15} />{creatingSession ? 'Creating…' : 'New conversation'}</button>
+    </section>
+    {sessions.map((session) => <section className="session-workspace" key={session.id} hidden={activeSessionId !== session.id}>
+      {!session.turns.length && <div className="suggestion-grid">{suggestions.map((item, index) => <button key={item} onClick={() => ask(session.id, item)}><span className={`suggestion-icon s${index}`}><LayoutDashboard size={18} /></span><strong>{['Compare vendor performance','Find recent anomalies','Inspect quality risk'][index]}</strong><small>{item}</small><ArrowRight size={16} /></button>)}</div>}
+      {session.turns.map((turn, index) => <div className="conversation" key={`${index}-${turn}`}><div className="user-message">{turn}</div><A2UIConversation conversationId={session.id} question={turn} onStreamingChange={index === session.turns.length - 1 ? (running) => setRunning(session.id, running) : undefined} /></div>)}
+      <QuestionComposer enabled={!session.running} running={session.running} onSubmit={(question) => ask(session.id, question)} />
+    </section>)}
+    {!sessions.length && <div className="assistant-loading"><i /><span>Preparing your first conversation…</span></div>}
   </div>
 }
 
