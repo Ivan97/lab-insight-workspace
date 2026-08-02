@@ -21,9 +21,9 @@ make dev
 
 The Vite product is then available at [http://127.0.0.1:5173](http://127.0.0.1:5173).
 
-## Optional DeepSeek or Kimi model
+## Configure DeepSeek or Kimi
 
-The full product remains demonstrable without a model key. To use an OpenAI-compatible provider for the final narrative answer, copy `.env.example` to `.env`, fill in the provider URL, API key and model, then export the values before starting. Schema mapping, SQL execution, metric calculation and tool execution remain controlled by the application.
+Copy `.env.example` to `.env` and fill in the OpenAI-compatible provider URL, API key and model. The backend loads this file automatically. Both Text-to-SQL planning and the final evidence-based answer use the configured model; missing or failed model calls are shown as explicit errors and never replaced by mock answers. SQLGlot validation, DuckDB execution and tool execution remain controlled by the application.
 
 ## Verification
 

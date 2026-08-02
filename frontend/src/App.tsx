@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity,
   ArrowRight,
@@ -189,7 +189,6 @@ function SchemaPage({ sources, batchId, onCommitted, onAnalyze }: { sources: Ing
 
 function AnalyzePage() {
   const [conversationId, setConversationId] = useState<string | null>(null)
-  const [question, setQuestion] = useState('Compare cost, pass rate and turnaround time by vendor')
   const [turns, setTurns] = useState<string[]>([])
   const suggestions = useMemo(() => [
     'Compare cost, pass rate and turnaround time by vendor',
@@ -197,11 +196,24 @@ function AnalyzePage() {
     'Which materials have the highest failure rate?',
   ], [])
   useEffect(() => { void api.createConversation().then((value) => setConversationId(value.conversation_id)) }, [])
-  const ask = (value = question) => { if (value.trim() && conversationId) { setQuestion(''); setTurns((current) => [...current, value.trim()]) } }
+  const ask = (value: string) => { if (value.trim() && conversationId) setTurns((current) => [...current, value.trim()]) }
   return <div className="page analyze-page">
     <section className="analyze-hero"><div><span className="eyebrow">ASK & ANALYZE</span><h1>What would you like to understand?</h1><p>Ask across every trusted source. Prism will show its work, use the right tools, and surface the decision—not just the numbers.</p></div></section>
     {!turns.length && <div className="suggestion-grid">{suggestions.map((item, index) => <button key={item} onClick={() => ask(item)}><span className={`suggestion-icon s${index}`}><LayoutDashboard size={18} /></span><strong>{['Compare vendor performance','Find recent anomalies','Inspect quality risk'][index]}</strong><small>{item}</small><ArrowRight size={16} /></button>)}</div>}
     {conversationId && turns.map((turn, index) => <div className="conversation" key={`${index}-${turn}`}><div className="user-message">{turn}</div><A2UIConversation conversationId={conversationId} question={turn} /></div>)}
-    <div className="composer-wrap"><div className="composer"><Sparkles size={18} /><textarea rows={1} value={question} onChange={(event) => setQuestion(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); ask() } }} aria-label="Ask a question" /><button onClick={() => ask()} aria-label="Send question"><ArrowRight size={18} /></button></div><span>Answers use published data only. SQL and metric definitions remain available for review.</span></div>
+    <QuestionComposer enabled={Boolean(conversationId)} onSubmit={ask} />
   </div>
+}
+
+function QuestionComposer({ enabled, onSubmit }: { enabled: boolean; onSubmit: (question: string) => void }) {
+  const [draft, setDraft] = useState('')
+  const inputRef = useRef<HTMLTextAreaElement>(null)
+  const submit = () => {
+    const value = draft.trim()
+    if (!enabled || !value) return
+    onSubmit(value)
+    setDraft('')
+    window.requestAnimationFrame(() => inputRef.current?.focus())
+  }
+  return <div className="composer-wrap"><form className="composer" onSubmit={(event) => { event.preventDefault(); submit() }}><Sparkles size={18} /><textarea ref={inputRef} rows={1} value={draft} disabled={!enabled} placeholder="Ask a question about the published data…" onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); submit() } }} aria-label="Ask a question" /><button type="submit" disabled={!enabled || !draft.trim()} aria-label="Send question"><ArrowRight size={18} /></button></form><span>Answers use published data only. SQL and metric definitions remain available for review.</span></div>
 }

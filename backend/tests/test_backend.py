@@ -4,9 +4,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from backend.app.a2ui import A2UIStream, validate_envelope
+from backend.app.analysis import run_analysis
 from backend.app.main import app
 from backend.app.model_client import OpenAICompatibleModel
 from backend.app.sql_guard import SQLGuardError, guard_sql
+from backend.app.text_to_sql import GeneratedPlan, ModelConfigurationError
 
 
 @pytest.fixture
@@ -44,6 +46,23 @@ def test_sql_guard_accepts_analytics_and_rejects_unsafe_sql():
         guard_sql("SELECT * FROM internal_users")
 
 
+def test_llm_plan_executes_guarded_query(monkeypatch):
+    plan = GeneratedPlan(
+        intent="project_cost",
+        sql="SELECT project, round(sum(cost_usd), 2) AS total_cost FROM fact_test_results GROUP BY project ORDER BY total_cost DESC",
+        title="Total cost by project",
+        tool_name="generate_column_chart",
+        x_field="project",
+        y_field="total_cost",
+        rationale="Compare project totals.",
+    )
+    monkeypatch.setattr("backend.app.analysis.TextToSQLPlanner.generate", lambda *_args, **_kwargs: plan)
+    analysis = run_analysis("Which projects cost the most?")
+    assert analysis["table"]["rows"]
+    assert "LIMIT 200" in analysis["sql"]
+    assert analysis["visualization"]["x_field"] == "project"
+
+
 def test_a2ui_envelope_shape():
     envelope = {
         "version": "v0.9.1",
@@ -61,6 +80,24 @@ async def test_stream_is_ordered_and_completes(monkeypatch):
         return {**visualization, "status": "SKIPPED", "asset_url": None}
 
     monkeypatch.setattr("backend.app.a2ui.AntVChartClient.render", fake_render)
+    monkeypatch.setattr(
+        "backend.app.a2ui.run_analysis",
+        lambda _question: {
+            "answer": "Query completed.",
+            "requires_clarification": False,
+            "kpis": [],
+            "table": {"columns": ["vendor", "tests"], "rows": [{"vendor": "A", "tests": 2}], "row_count": 1, "truncated": False},
+            "insights": [],
+            "sql": "SELECT vendor, count(*) AS tests FROM fact_test_results GROUP BY vendor LIMIT 200",
+            "visualization": {"status": "PENDING", "tool_name": "generate_column_chart", "title": "Tests", "rationale": "Comparison", "x_field": "vendor", "y_field": "tests", "data": [{"vendor": "A", "tests": 2}]},
+            "warnings": [],
+        },
+    )
+
+    async def fake_answer(self, question, analysis):
+        yield "A has 2 tests."
+
+    monkeypatch.setattr("backend.app.a2ui.OpenAICompatibleModel.stream_answer", fake_answer)
     with TestClient(app) as client:
         conversation = client.post("/api/v1/conversations").json()
         stream = A2UIStream(conversation["conversation_id"], "Compare vendors")
@@ -95,14 +132,13 @@ def test_cancel_streaming_message(client: TestClient):
 
 
 @pytest.mark.asyncio
-async def test_unconfigured_model_fallback_still_streams(monkeypatch):
+async def test_unconfigured_model_fails_instead_of_mocking(monkeypatch):
     monkeypatch.delenv("LLM_BASE_URL", raising=False)
     monkeypatch.delenv("LLM_API_KEY", raising=False)
-    chunks = [
-        chunk
-        async for chunk in OpenAICompatibleModel().stream_answer(
-            "question", {"answer": "This deterministic answer is emitted in multiple visible chunks."}
-        )
-    ]
-    assert len(chunks) > 1
-    assert "".join(chunks) == "This deterministic answer is emitted in multiple visible chunks."
+    with pytest.raises(ModelConfigurationError):
+        _ = [
+            chunk
+            async for chunk in OpenAICompatibleModel().stream_answer(
+                "question", {"answer": "This must never be returned as a mock."}
+            )
+        ]

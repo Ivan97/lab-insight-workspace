@@ -9,7 +9,7 @@ DISALLOWED_TOKENS = re.compile(
     re.IGNORECASE,
 )
 EXTERNAL_READERS = re.compile(
-    r"\b(read_csv|read_json|read_parquet|parquet_scan|sqlite_scan|postgres_scan|httpfs)\s*\(",
+    r"\b(glob|query|query_table|read_blob|read_csv|read_json|read_parquet|read_text|parquet_scan|sqlite_scan|postgres_scan|httpfs)\s*\(",
     re.IGNORECASE,
 )
 
@@ -36,4 +36,6 @@ def guard_sql(sql: str) -> str:
         raise SQLGuardError(f"Query references unapproved tables: {', '.join(sorted(unknown))}")
     if not tables:
         raise SQLGuardError("Query must reference the approved analytical view")
+    if statement.args.get("limit") is None:
+        statement = statement.limit(200)
     return statement.sql(dialect="duckdb", pretty=False)

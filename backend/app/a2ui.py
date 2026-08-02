@@ -78,60 +78,95 @@ class A2UIStream:
 
         yield self._sse(self._update_reasoning("正在理解问题并选择可信的数据范围。", "RUNNING"))
         await asyncio.sleep(0.12)
-        yield self._sse(self._update_tool("query", "Query DuckDB", "RUNNING", 1))
+        yield self._sse(
+            self._update_tool("query", "LLM Text-to-SQL · SQLGlot · DuckDB", "RUNNING", 1)
+        )
         yield self._sse(
             self._update_reasoning("已锁定统一分析视图，正在执行只读聚合查询。", "RUNNING")
         )
-        analysis = await asyncio.to_thread(run_analysis, self.question)
+        try:
+            analysis = await asyncio.to_thread(run_analysis, self.question)
+        except Exception as exc:  # noqa: BLE001 - stream failures must become visible UI state.
+            yield self._sse(
+                self._update_tool(
+                    "query",
+                    "LLM Text-to-SQL · SQLGlot · DuckDB",
+                    "FAILED",
+                    1,
+                    type(exc).__name__,
+                )
+            )
+            async for event in self._failure_events(
+                "无法完成真实数据查询。请检查模型配置或换一种数据问题后重试。"
+            ):
+                yield event
+            return
         if self._is_cancelled():
             yield self._sse(self._update("/status", "CANCELLED"))
             return
         yield self._sse(
             self._update_tool(
-                "query", "Query DuckDB", "COMPLETED", 1, "Returned trusted aggregate rows"
+                "query",
+                "LLM Text-to-SQL · SQLGlot · DuckDB",
+                "COMPLETED",
+                1,
+                "Asked for a data clarification without running SQL"
+                if analysis["requires_clarification"]
+                else "Generated, validated and executed read-only SQL",
             )
         )
 
         chart_tool = analysis["visualization"]["tool_name"]
-        yield self._sse(self._update_tool("chart", f"AntV · {chart_tool}", "RUNNING", 2))
-        yield self._sse(
-            self._update_reasoning(
-                "查询结果已通过检查，正在由 Visualization Agent 选择并调用图表工具。", "RUNNING"
+        if analysis["visualization"]["status"] == "PENDING":
+            yield self._sse(self._update_tool("chart", f"AntV · {chart_tool}", "RUNNING", 2))
+            yield self._sse(
+                self._update_reasoning(
+                    "查询结果已通过检查，正在由 Visualization Agent 选择并调用图表工具。",
+                    "RUNNING",
+                )
             )
-        )
-        visualization = await AntVChartClient().render(analysis["visualization"])
-        if self._is_cancelled():
-            yield self._sse(self._update("/status", "CANCELLED"))
-            return
-        analysis["visualization"] = visualization
-        yield self._sse(
-            self._update_tool(
-                "chart",
-                f"AntV · {chart_tool}",
-                "COMPLETED" if visualization["status"] == "READY" else "FAILED",
-                2,
-                visualization.get("error") or "Chart artifact generated",
+            visualization = await AntVChartClient().render(analysis["visualization"])
+            if self._is_cancelled():
+                yield self._sse(self._update("/status", "CANCELLED"))
+                return
+            analysis["visualization"] = visualization
+            yield self._sse(
+                self._update_tool(
+                    "chart",
+                    f"AntV · {chart_tool}",
+                    "COMPLETED" if visualization["status"] == "READY" else "FAILED",
+                    2,
+                    visualization.get("error") or "Chart artifact generated",
+                )
             )
-        )
 
         yield self._sse(
             self._update_reasoning("正在把事实、口径和限制整理成可审阅的结论。", "RUNNING")
         )
         markdown = ""
         body_chunk_count = 0
-        async for chunk in OpenAICompatibleModel().stream_answer(self.question, analysis):
-            if self._is_cancelled():
-                yield self._sse(self._update("/status", "CANCELLED"))
-                return
-            body_chunk_count += 1
-            markdown += chunk
-            self.model["content"]["markdown"] = markdown
-            yield self._sse(self._update("/content/markdown", markdown))
-            if body_chunk_count == 2:
-                yield self._sse(
-                    self._update_reasoning("正文生成期间再次核对指标口径与图表证据。", "RUNNING")
-                )
-            await asyncio.sleep(0.04)
+        try:
+            async for chunk in OpenAICompatibleModel().stream_answer(self.question, analysis):
+                if self._is_cancelled():
+                    yield self._sse(self._update("/status", "CANCELLED"))
+                    return
+                body_chunk_count += 1
+                markdown += chunk
+                self.model["content"]["markdown"] = markdown
+                yield self._sse(self._update("/content/markdown", markdown))
+                if body_chunk_count == 2:
+                    yield self._sse(
+                        self._update_reasoning(
+                            "正文生成期间再次核对指标口径与图表证据。", "RUNNING"
+                        )
+                    )
+                await asyncio.sleep(0.04)
+        except Exception as exc:  # noqa: BLE001 - expose failure instead of a fake fallback.
+            async for event in self._failure_events(
+                f"数据查询已完成，但真实模型回答失败（{type(exc).__name__}）。请检查模型服务后重试。"
+            ):
+                yield event
+            return
 
         self.model["analysis"] = analysis
         yield self._sse(self._update("/analysis", analysis))
@@ -216,6 +251,19 @@ class A2UIStream:
                     utcnow(),
                     self.message_id,
                 ],
+            )
+
+    async def _failure_events(self, message: str) -> AsyncIterator[str]:
+        self.model["content"]["markdown"] = message
+        yield self._sse(self._update("/content/markdown", message))
+        self.model["reasoning"]["status"] = "COMPLETED"
+        yield self._sse(self._update("/reasoning/status", "COMPLETED"))
+        self.model["status"] = "FAILED"
+        yield self._sse(self._update("/status", "FAILED"))
+        with connection() as conn:
+            conn.execute(
+                "UPDATE messages SET content = ?, status = 'FAILED', a2ui_surface_snapshot = ?, completed_at = ? WHERE message_id = ?",
+                [message, json_dumps(self.model), utcnow(), self.message_id],
             )
 
     def _is_cancelled(self) -> bool:

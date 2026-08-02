@@ -1,10 +1,12 @@
-import asyncio
 import json
 import os
 from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
+
+from .config import ROOT_DIR  # noqa: F401 - importing config loads local runtime settings.
+from .text_to_sql import ModelConfigurationError, ModelRequestError
 
 
 class OpenAICompatibleModel:
@@ -19,9 +21,9 @@ class OpenAICompatibleModel:
 
     async def stream_answer(self, question: str, analysis: dict[str, Any]) -> AsyncIterator[str]:
         if not self.configured:
-            async for chunk in self._fallback(analysis["answer"]):
-                yield chunk
-            return
+            raise ModelConfigurationError(
+                "LLM is not configured. Set LLM_BASE_URL, LLM_API_KEY and LLM_MODEL."
+            )
         prompt = (
             "You are a careful internal data analyst. Answer only from the supplied query result. "
             "Write concise Markdown: lead with the direct answer, then at most two evidence bullets. "
@@ -54,15 +56,8 @@ class OpenAICompatibleModel:
                     if content:
                         emitted = True
                         yield content
-        except (httpx.HTTPError, KeyError, ValueError, json.JSONDecodeError):
+        except (httpx.HTTPError, KeyError, ValueError, json.JSONDecodeError) as exc:
             if not emitted:
-                async for chunk in self._fallback(analysis["answer"]):
-                    yield chunk
-
-    @staticmethod
-    async def _fallback(answer: str) -> AsyncIterator[str]:
-        words = answer.split()
-        for start in range(0, len(words), 4):
-            prefix = "" if start == 0 else " "
-            yield prefix + " ".join(words[start : start + 4])
-            await asyncio.sleep(0.035)
+                raise ModelRequestError(
+                    f"Answer model request failed: {type(exc).__name__}"
+                ) from exc

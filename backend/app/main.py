@@ -49,7 +49,7 @@ def health() -> dict:
         "version": "0.1.0",
         "database": {"status": "ready"},
         "model": {
-            "provider": os.getenv("LLM_PROVIDER", "deterministic-demo"),
+            "provider": os.getenv("LLM_PROVIDER", "not-configured"),
             "configured": model_configured,
         },
         "visualization_mcp": {"status": "optional", "url": "http://127.0.0.1:1122/mcp"},
