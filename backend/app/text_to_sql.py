@@ -57,6 +57,10 @@ Rules:
 - x_field and y_field must exactly match selected SQL aliases.
 - Use a line chart for ordered time, a bar chart for long category labels, otherwise a column chart.
 - If the message is not an analytical data question, set clarification to a short helpful question and sql to null.
+- reasoning_summary must contain 1-3 short, user-visible progress summaries grounded in the
+  actual plan you produced. Describe the selected data scope, metric interpretation, and intended
+  operation. Do not reveal private chain-of-thought, fabricate completed work, or use generic
+  boilerplate such as "thinking about the question". Use the same language as the user's question.
 
 Required JSON shape:
 {
@@ -68,7 +72,8 @@ Required JSON shape:
   "y_field": "selected_numeric_alias",
   "formats": {"selected_alias": "TEXT", "selected_numeric_alias": "DECIMAL_2"},
   "rationale": "one sentence",
-  "clarification": null or "short clarification"
+  "clarification": null or "short clarification",
+  "reasoning_summary": ["concise visible planning update"]
 }
 """
 
@@ -92,6 +97,7 @@ class GeneratedPlan:
     rationale: str
     clarification: str | None = None
     formats: dict[str, str] = field(default_factory=dict)
+    reasoning_summary: tuple[str, ...] = ()
 
 
 class TextToSQLPlanner:
@@ -146,7 +152,10 @@ class TextToSQLPlanner:
     def _parse_plan(content: str) -> GeneratedPlan:
         cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip(), flags=re.IGNORECASE)
         payload = json.loads(cleaned)
-        required = {"intent", "title", "tool_name", "x_field", "y_field", "formats", "rationale"}
+        required = {
+            "intent", "title", "tool_name", "x_field", "y_field", "formats", "rationale",
+            "reasoning_summary",
+        }
         if not required.issubset(payload):
             raise ValueError("Planner response is missing required fields")
         sql = payload.get("sql")
@@ -161,6 +170,13 @@ class TextToSQLPlanner:
             raise ValueError("Planner response contains invalid result formats")
         if sql and (str(payload["x_field"]) not in formats or str(payload["y_field"]) not in formats):
             raise ValueError("Planner response is missing chart field formats")
+        reasoning_summary = payload.get("reasoning_summary")
+        if (
+            not isinstance(reasoning_summary, list)
+            or not 1 <= len(reasoning_summary) <= 3
+            or any(not isinstance(item, str) or not item.strip() for item in reasoning_summary)
+        ):
+            raise ValueError("Planner response requires 1-3 visible reasoning summaries")
         return GeneratedPlan(
             intent=str(payload["intent"]),
             sql=str(sql) if sql else None,
@@ -171,4 +187,5 @@ class TextToSQLPlanner:
             rationale=str(payload["rationale"]),
             clarification=str(clarification) if clarification else None,
             formats={str(key): str(value) for key, value in formats.items()},
+            reasoning_summary=tuple(item.strip() for item in reasoning_summary),
         )

@@ -12,7 +12,7 @@ import { createUuid } from '../utils/id'
 export const CATALOG_ID = 'https://mini-hackathon.local/a2ui/catalogs/analytics-chat/v1'
 
 type ReasoningSegment = { id: string; text: string; createdAt: string }
-type ToolCall = { toolCallId: string; displayName: string; status: string; sequence: number; summary?: string }
+type ToolCall = { toolCallId: string; displayName: string; status: string; sequence: number; summary?: string; arguments?: unknown; result?: unknown }
 type ToolGroup = { groupId: string; calls: ToolCall[] }
 type Kpi = { key: string; label: string; value: number; format: string }
 type ResultFormat = 'TEXT' | 'INTEGER' | 'DECIMAL_2' | 'CURRENCY_USD' | 'PERCENT_2' | 'DATE' | 'MONTH' | 'DATETIME'
@@ -60,18 +60,23 @@ const ToolCallGroup = createComponentImplementation(ToolApi, ({ props }) => {
   const calls = [...group.calls].sort((a, b) => a.sequence - b.sequence)
   const running = calls.some((call) => call.status === 'RUNNING')
   const cancelled = calls.some((call) => call.status === 'CANCELLED')
+  const failed = calls.some((call) => call.status === 'FAILED')
   const label = calls.length === 1 ? calls[0].displayName : `已调用 ${calls.length} 个工具`
   return <section className="tool-group">
     <button className="tool-summary" onClick={() => setOpen((value) => !value)}>
       <span>{running ? <LoaderCircle size={15} className="spin" /> : cancelled ? <CircleStop size={15} /> : <Wrench size={15} />}{label}</span>
-      <span className="tool-state">{running ? '运行中' : cancelled ? '已停止' : '完成'} <ChevronRight size={14} /></span>
+      <span className="tool-state">{running ? '运行中' : cancelled ? '已停止' : failed ? '部分失败' : '完成'} <ChevronRight size={14} /></span>
     </button>
     {open && <div className="tool-list">{calls.map((call) => <div className="tool-item" key={call.toolCallId}>
       <button onClick={() => setActive(active === call.toolCallId ? null : call.toolCallId)}>
         {call.status === 'RUNNING' ? <LoaderCircle size={14} className="spin" /> : call.status === 'FAILED' ? <CircleAlert size={14} /> : call.status === 'CANCELLED' ? <CircleStop size={14} /> : <Check size={14} />}
         <span>{call.displayName}</span><small>{call.status.toLowerCase()}</small><ChevronDown size={13} />
       </button>
-      {active === call.toolCallId && <div className="tool-detail"><span>Tool call</span><code>{call.toolCallId}</code><span>Output</span><p>{call.summary ?? 'Waiting for tool output…'}</p></div>}
+      {active === call.toolCallId && <div className="tool-detail">
+        <span>Tool call</span><code>{call.toolCallId}</code>
+        <span>Arguments</span><pre><code>{formatToolValue(call.arguments)}</code></pre>
+        <span>Result</span><pre><code>{formatToolValue(call.result ?? call.summary ?? 'Waiting for tool output…')}</code></pre>
+      </div>}
     </div>)}</div>}
   </section>
 })
@@ -130,6 +135,7 @@ function MermaidDiagram({ source }: { source: string }) {
 function isSafeImageUrl(value: string) {
   try { const url = new URL(value, window.location.origin); return url.origin === window.location.origin || (url.protocol === 'https:' && url.hostname === 'mdn.alipayobjects.com') } catch { return false }
 }
+function formatToolValue(value: unknown) { return typeof value === 'string' ? value : JSON.stringify(value ?? {}, null, 2) }
 function formatKpi(kpi: Kpi) { if (kpi.format === 'CURRENCY_USD') return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(kpi.value); if (kpi.format === 'PERCENT') return `${kpi.value}%`; if (kpi.format === 'DAYS') return `${kpi.value} days`; return kpi.value.toLocaleString() }
 function humanize(value: string) { return value.replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase()) }
 function formatResultValue(value: string | number, format?: ResultFormat) {

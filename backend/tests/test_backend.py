@@ -8,8 +8,8 @@ from backend.app.analysis import run_analysis
 from backend.app.database import connection
 from backend.app.main import app
 from backend.app.model_client import ANSWER_SYSTEM_PROMPT, OpenAICompatibleModel
-from backend.app.sql_guard import SQLGuardError, guard_sql
 from backend.app.semantic import semantic_prompt_context
+from backend.app.sql_guard import SQLGuardError, guard_sql
 from backend.app.text_to_sql import SYSTEM_PROMPT, GeneratedPlan, ModelConfigurationError
 
 
@@ -160,15 +160,31 @@ def test_llm_plan_executes_guarded_query(monkeypatch):
         y_field="total_cost",
         rationale="Compare project totals.",
         formats={"project": "TEXT", "total_cost": "CURRENCY_USD"},
+        reasoning_summary=("按项目聚合测试成本，并按总成本降序比较。",),
     )
     monkeypatch.setattr("backend.app.analysis.TextToSQLPlanner.generate", lambda *_args, **_kwargs: plan)
-    analysis = run_analysis("Which projects cost the most?")
+    events = []
+    analysis = run_analysis("Which projects cost the most?", events.append)
     assert analysis["table"]["rows"]
     assert "LIMIT 200" in analysis["sql"]
     assert analysis["visualization"]["x_field"] == "project"
     assert analysis["table"]["formats"]["total_cost"] == "CURRENCY_USD"
     totals = [row["total_cost"] for row in analysis["table"]["rows"]]
     assert all(value == round(value, 2) for value in totals)
+    assert events[0] == {
+        "type": "reasoning",
+        "text": "按项目聚合测试成本，并按总成本降序比较。",
+    }
+    completed_tools = [
+        event
+        for event in events
+        if event["type"] == "tool_result" and event["status"] == "COMPLETED"
+    ]
+    assert [event["name"] for event in completed_tools] == [
+        "SQLGlot · validate_sql",
+        "DuckDB · execute_query",
+    ]
+    assert completed_tools[-1]["result"]["row_count"] > 0
 
 
 def test_a2ui_envelope_shape():
@@ -188,9 +204,14 @@ async def test_stream_is_ordered_and_completes(monkeypatch):
         return {**visualization, "status": "SKIPPED", "asset_url": None}
 
     monkeypatch.setattr("backend.app.a2ui.AntVChartClient.render", fake_render)
-    monkeypatch.setattr(
-        "backend.app.a2ui.run_analysis",
-        lambda _question: {
+    def fake_analysis(_question, event_sink):
+        event_sink({"type": "reasoning", "text": "按供应商聚合测试数量。"})
+        event_sink({
+            "type": "tool_result", "tool_call_id": "duckdb_query:1",
+            "name": "DuckDB · execute_query", "status": "COMPLETED",
+            "arguments": {"sql": "SELECT 1"}, "result": {"row_count": 1},
+        })
+        return {
             "answer": "Query completed.",
             "requires_clarification": False,
             "kpis": [],
@@ -199,8 +220,9 @@ async def test_stream_is_ordered_and_completes(monkeypatch):
             "sql": "SELECT vendor, count(*) AS tests FROM fact_test_results GROUP BY vendor LIMIT 200",
             "visualization": {"status": "PENDING", "tool_name": "generate_column_chart", "title": "Tests", "rationale": "Comparison", "x_field": "vendor", "y_field": "tests", "data": [{"vendor": "A", "tests": 2}]},
             "warnings": [],
-        },
-    )
+        }
+
+    monkeypatch.setattr("backend.app.a2ui.run_analysis", fake_analysis)
 
     async def fake_answer(self, question, analysis):
         yield "A has 2 tests."
@@ -219,6 +241,12 @@ async def test_stream_is_ordered_and_completes(monkeypatch):
     ]
     assert "createSurface" in envelopes[0]
     assert envelopes[-1]["updateDataModel"]["value"] == "COMPLETED"
+    tool_updates = [
+        envelope["updateDataModel"]["value"]
+        for envelope in envelopes
+        if envelope.get("updateDataModel", {}).get("path") == "/toolGroups/analysis"
+    ]
+    assert tool_updates[0]["calls"][0]["arguments"] == {"sql": "SELECT 1"}
     with TestClient(app) as client:
         history = client.get(
             f"/api/v1/conversations/{conversation['conversation_id']}/messages"

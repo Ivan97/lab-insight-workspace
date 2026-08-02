@@ -8,7 +8,6 @@ import httpx
 from .config import ROOT_DIR  # noqa: F401 - importing config loads local runtime settings.
 from .text_to_sql import ModelConfigurationError, ModelRequestError
 
-
 ANSWER_SYSTEM_PROMPT = """You are a careful internal data analyst.
 Answer only from the supplied query result and never invent causes or numbers.
 Write concise Markdown: lead with the direct answer, then at most two evidence bullets.

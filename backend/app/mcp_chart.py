@@ -11,11 +11,11 @@ from .config import ARTIFACT_DIR
 
 class AntVChartClient:
     def __init__(self) -> None:
-        self.url = os.getenv("MCP_CHART_URL", "http://127.0.0.1:1122/mcp")
+        self.url = os.getenv("MCP_CHART_URL", "http://localhost:1122/mcp")
 
-    async def render(self, visualization: dict[str, Any]) -> dict[str, Any]:
-        tool_name = visualization["tool_name"]
-        arguments = {
+    @staticmethod
+    def arguments_for(visualization: dict[str, Any]) -> dict[str, Any]:
+        return {
             "data": visualization["data"],
             "xField": visualization["x_field"],
             "yField": visualization["y_field"],
@@ -23,6 +23,10 @@ class AntVChartClient:
             "width": 1200,
             "height": 640,
         }
+
+    async def render(self, visualization: dict[str, Any]) -> dict[str, Any]:
+        tool_name = visualization["tool_name"]
+        arguments = self.arguments_for(visualization)
         try:
             async with (
                 httpx.AsyncClient(trust_env=False) as http_client,

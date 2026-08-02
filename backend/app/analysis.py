@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
@@ -7,6 +8,13 @@ import duckdb
 from .database import connection, rows_as_dicts
 from .sql_guard import SQLGuardError, guard_sql
 from .text_to_sql import GeneratedPlan, TextToSQLPlanner
+
+AnalysisEventSink = Callable[[dict[str, Any]], None]
+
+
+def _emit(event_sink: AnalysisEventSink | None, event: dict[str, Any]) -> None:
+    if event_sink:
+        event_sink(event)
 
 
 def _empty_analysis(answer: str) -> dict[str, Any]:
@@ -30,18 +38,91 @@ def _empty_analysis(answer: str) -> dict[str, Any]:
     }
 
 
-def _execute_plan(plan: GeneratedPlan) -> tuple[str, list[dict[str, Any]]]:
+def _execute_plan(
+    plan: GeneratedPlan,
+    event_sink: AnalysisEventSink | None = None,
+    attempt: int = 1,
+) -> tuple[str, list[dict[str, Any]]]:
     if not plan.sql:
         raise ValueError("The generated plan does not contain SQL")
-    guarded_sql = guard_sql(plan.sql)
-    with connection() as conn:
-        conn.execute(f"EXPLAIN {guarded_sql}")
-        rows = rows_as_dicts(conn.execute(guarded_sql))
+    guard_id = f"sql_guard:{attempt}"
+    _emit(event_sink, {
+        "type": "tool_call",
+        "tool_call_id": guard_id,
+        "name": "SQLGlot · validate_sql",
+        "status": "RUNNING",
+        "arguments": {"sql": plan.sql},
+    })
+    try:
+        guarded_sql = guard_sql(plan.sql)
+    except Exception as exc:
+        _emit(event_sink, {
+            "type": "tool_result",
+            "tool_call_id": guard_id,
+            "name": "SQLGlot · validate_sql",
+            "status": "FAILED",
+            "arguments": {"sql": plan.sql},
+            "result": {"error": str(exc)},
+        })
+        raise
+    _emit(event_sink, {
+        "type": "tool_result",
+        "tool_call_id": guard_id,
+        "name": "SQLGlot · validate_sql",
+        "status": "COMPLETED",
+        "arguments": {"sql": plan.sql},
+        "result": {"validated_sql": guarded_sql, "read_only": True},
+    })
+
+    query_id = f"duckdb_query:{attempt}"
+    _emit(event_sink, {
+        "type": "tool_call",
+        "tool_call_id": query_id,
+        "name": "DuckDB · execute_query",
+        "status": "RUNNING",
+        "arguments": {"sql": guarded_sql},
+    })
+    try:
+        with connection() as conn:
+            conn.execute(f"EXPLAIN {guarded_sql}")
+            rows = rows_as_dicts(conn.execute(guarded_sql))
+    except Exception as exc:
+        _emit(event_sink, {
+            "type": "tool_result",
+            "tool_call_id": query_id,
+            "name": "DuckDB · execute_query",
+            "status": "FAILED",
+            "arguments": {"sql": guarded_sql},
+            "result": {"error": str(exc)},
+        })
+        raise
     if rows:
         columns = set(rows[0])
         if plan.x_field not in columns or plan.y_field not in columns:
-            raise ValueError("Chart fields do not match the SQL result aliases")
-    return guarded_sql, [{key: _to_json_value(value) for key, value in row.items()} for row in rows]
+            error = "Chart fields do not match the SQL result aliases"
+            _emit(event_sink, {
+                "type": "tool_result",
+                "tool_call_id": query_id,
+                "name": "DuckDB · execute_query",
+                "status": "FAILED",
+                "arguments": {"sql": guarded_sql},
+                "result": {"error": error, "columns": list(rows[0])},
+            })
+            raise ValueError(error)
+    json_rows = [{key: _to_json_value(value) for key, value in row.items()} for row in rows]
+    _emit(event_sink, {
+        "type": "tool_result",
+        "tool_call_id": query_id,
+        "name": "DuckDB · execute_query",
+        "status": "COMPLETED",
+        "arguments": {"sql": guarded_sql},
+        "result": {
+            "row_count": len(json_rows),
+            "columns": list(json_rows[0]) if json_rows else [],
+            "rows": json_rows,
+        },
+    })
+    return guarded_sql, json_rows
 
 
 def _to_json_value(value: Any) -> Any:
@@ -55,19 +136,25 @@ def _to_json_value(value: Any) -> Any:
     return value
 
 
-def run_analysis(question: str) -> dict[str, Any]:
+def run_analysis(
+    question: str, event_sink: AnalysisEventSink | None = None
+) -> dict[str, Any]:
     planner = TextToSQLPlanner()
     plan = planner.generate(question)
+    for summary in plan.reasoning_summary:
+        _emit(event_sink, {"type": "reasoning", "text": summary})
     if plan.clarification:
         return _empty_analysis(plan.clarification)
 
     try:
-        guarded_sql, rows = _execute_plan(plan)
+        guarded_sql, rows = _execute_plan(plan, event_sink, attempt=1)
     except (SQLGuardError, duckdb.Error, ValueError) as exc:
         plan = planner.generate(question, repair_context=str(exc))
+        for summary in plan.reasoning_summary:
+            _emit(event_sink, {"type": "reasoning", "text": summary})
         if plan.clarification:
             return _empty_analysis(plan.clarification)
-        guarded_sql, rows = _execute_plan(plan)
+        guarded_sql, rows = _execute_plan(plan, event_sink, attempt=2)
 
     with connection() as conn:
         total_tests, total_cost, pass_rate, turnaround = conn.execute(

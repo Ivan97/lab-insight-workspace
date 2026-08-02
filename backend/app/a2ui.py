@@ -47,6 +47,8 @@ class A2UIStream:
         self.surface_id = f"message:{self.message_id}"
         self.sequence = 0
         self.resume_after = resume_after
+        self.tool_sequence = 0
+        self.tool_sequences: dict[str, int] = {}
         self.model: dict[str, Any] = {
             "reasoning": {"segments": [], "status": "IDLE"},
             "content": {"markdown": ""},
@@ -76,26 +78,38 @@ class A2UIStream:
         )
         yield self._sse(self._update("/", self.model))
 
-        yield self._sse(self._update_reasoning("正在理解问题并选择可信的数据范围。", "RUNNING"))
-        await asyncio.sleep(0.12)
-        yield self._sse(
-            self._update_tool("query", "LLM Text-to-SQL · SQLGlot · DuckDB", "RUNNING", 1)
-        )
-        yield self._sse(
-            self._update_reasoning("已锁定统一分析视图，正在执行只读聚合查询。", "RUNNING")
+        event_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+
+        def receive_analysis_event(event: dict[str, Any]) -> None:
+            loop.call_soon_threadsafe(event_queue.put_nowait, event)
+
+        analysis_task = asyncio.create_task(
+            asyncio.to_thread(run_analysis, self.question, receive_analysis_event)
         )
         try:
-            analysis = await asyncio.to_thread(run_analysis, self.question)
-        except Exception as exc:  # noqa: BLE001 - stream failures must become visible UI state.
-            yield self._sse(
-                self._update_tool(
-                    "query",
-                    "LLM Text-to-SQL · SQLGlot · DuckDB",
-                    "FAILED",
-                    1,
-                    type(exc).__name__,
-                )
-            )
+            while not analysis_task.done() or not event_queue.empty():
+                try:
+                    event = await asyncio.wait_for(event_queue.get(), timeout=0.05)
+                except TimeoutError:
+                    continue
+                if event["type"] == "reasoning":
+                    yield self._sse(self._update_reasoning(event["text"], "RUNNING"))
+                    continue
+                if event["type"] in {"tool_call", "tool_result"}:
+                    tool_call_id = event["tool_call_id"]
+                    yield self._sse(
+                        self._update_tool(
+                            tool_call_id,
+                            event["name"],
+                            event["status"],
+                            self._tool_sequence(tool_call_id),
+                            arguments=event.get("arguments"),
+                            result=event.get("result"),
+                        )
+                    )
+            analysis = await analysis_task
+        except Exception:  # noqa: BLE001 - stream failures must become visible UI state.
             async for event in self._failure_events(
                 "无法完成真实数据查询。请检查模型配置或换一种数据问题后重试。"
             ):
@@ -104,47 +118,41 @@ class A2UIStream:
         if self._is_cancelled():
             yield self._sse(self._update("/status", "CANCELLED"))
             return
-        yield self._sse(
-            self._update_tool(
-                "query",
-                "LLM Text-to-SQL · SQLGlot · DuckDB",
-                "COMPLETED",
-                1,
-                "Asked for a data clarification without running SQL"
-                if analysis["requires_clarification"]
-                else "Generated, validated and executed read-only SQL",
-            )
-        )
-
         chart_tool = analysis["visualization"]["tool_name"]
         if analysis["visualization"]["status"] == "PENDING":
-            yield self._sse(self._update_tool("chart", f"AntV · {chart_tool}", "RUNNING", 2))
+            chart_call_id = f"antv:{chart_tool}"
+            chart_client = AntVChartClient()
+            chart_arguments = chart_client.arguments_for(analysis["visualization"])
             yield self._sse(
-                self._update_reasoning(
-                    "查询结果已通过检查，正在由 Visualization Agent 选择并调用图表工具。",
+                self._update_tool(
+                    chart_call_id,
+                    f"AntV MCP · {chart_tool}",
                     "RUNNING",
+                    self._tool_sequence(chart_call_id),
+                    arguments=chart_arguments,
                 )
             )
-            visualization = await AntVChartClient().render(analysis["visualization"])
+            visualization = await chart_client.render(analysis["visualization"])
             if self._is_cancelled():
                 yield self._sse(self._update("/status", "CANCELLED"))
                 return
             analysis["visualization"] = visualization
             yield self._sse(
                 self._update_tool(
-                    "chart",
-                    f"AntV · {chart_tool}",
+                    chart_call_id,
+                    f"AntV MCP · {chart_tool}",
                     "COMPLETED" if visualization["status"] == "READY" else "FAILED",
-                    2,
-                    visualization.get("error") or "Chart artifact generated",
+                    self._tool_sequence(chart_call_id),
+                    arguments=chart_arguments,
+                    result={
+                        "status": visualization["status"],
+                        "asset_url": visualization.get("asset_url"),
+                        "error": visualization.get("error"),
+                    },
                 )
             )
 
-        yield self._sse(
-            self._update_reasoning("正在把事实、口径和限制整理成可审阅的结论。", "RUNNING")
-        )
         markdown = ""
-        body_chunk_count = 0
         if analysis["requires_clarification"]:
             markdown = analysis["answer"]
             self.model["content"]["markdown"] = markdown
@@ -155,16 +163,9 @@ class A2UIStream:
                     if self._is_cancelled():
                         yield self._sse(self._update("/status", "CANCELLED"))
                         return
-                    body_chunk_count += 1
                     markdown += chunk
                     self.model["content"]["markdown"] = markdown
                     yield self._sse(self._update("/content/markdown", markdown))
-                    if body_chunk_count == 2:
-                        yield self._sse(
-                            self._update_reasoning(
-                                "正文生成期间再次核对指标口径与图表证据。", "RUNNING"
-                            )
-                        )
                     await asyncio.sleep(0.04)
             except Exception as exc:  # noqa: BLE001 - expose failure instead of a fake fallback.
                 async for event in self._failure_events(
@@ -189,7 +190,14 @@ class A2UIStream:
         return self._update("/reasoning", self.model["reasoning"])
 
     def _update_tool(
-        self, key: str, name: str, status: str, sequence: int, summary: str | None = None
+        self,
+        key: str,
+        name: str,
+        status: str,
+        sequence: int,
+        summary: str | None = None,
+        arguments: dict[str, Any] | None = None,
+        result: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         group = self.model["toolGroups"].setdefault(
             "analysis", {"groupId": "analysis", "calls": []}
@@ -201,12 +209,20 @@ class A2UIStream:
             "status": status,
             "sequence": sequence,
             "summary": summary,
+            "arguments": arguments,
+            "result": result,
         }
         if existing:
             existing.update(payload)
         else:
             group["calls"].append(payload)
         return self._update("/toolGroups/analysis", group)
+
+    def _tool_sequence(self, tool_call_id: str) -> int:
+        if tool_call_id not in self.tool_sequences:
+            self.tool_sequence += 1
+            self.tool_sequences[tool_call_id] = self.tool_sequence
+        return self.tool_sequences[tool_call_id]
 
     def _update(self, path: str, value: Any) -> dict[str, Any]:
         return self._envelope(
