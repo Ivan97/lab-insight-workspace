@@ -844,7 +844,7 @@ flowchart TB
 | 数据处理 | Polars | 用于读取、Profiling、清洗和批量转换；性能好且表达清晰 |
 | SQL 解析 | SQLGlot | 做 AST 校验、表和函数白名单、SQL 规范化及有限方言处理 |
 | 可视化 | Visualization Agent + `@antv/mcp-server-chart` | Agent 根据问题、语义和结果自主选择 MCP 工具；不在应用中硬编码数据类型与图表类型的映射 |
-| MCP Transport | 本地 Streamable HTTP | MCP Server 独立运行在本机，FastAPI 作为 MCP Client；比每次启动 stdio 子进程更易做健康检查和超时控制 |
+| MCP Transport | `npx` + stdio | FastAPI 按需执行 `npx -y @antv/mcp-server-chart`，通过标准输入输出完成 MCP 通信，不依赖预启动端口 |
 | 图表展示 | 同源图片资产 + 原始结果表 | 后端把 MCP 返回的图表下载到临时缓存并通过本产品域名提供；前端不直接信任或长期依赖第三方 URL |
 | 前端数据访问 | 生成的 TypeScript API Client | 直接来自 OpenAPI，避免前后端各维护一套字段名称和枚举 |
 | 前端 Mock | Mock Service Worker | 后端未完成时按同一契约返回固定数据，支持真正并行开发 |
@@ -1267,7 +1267,7 @@ Agent 每次最多调用一个主可视化工具，避免为了展示能力生�
 
 ### 12.2 MCP 调用链路
 
-1. FastAPI 启动时连接本地 `mcp-server-chart --transport streamable`；
+1. 需要图表时，FastAPI 按需执行 `npx -y @antv/mcp-server-chart` 并建立 stdio MCP 会话；
 2. MCP Client 调用 `tools/list` 获取当前可用工具并缓存工具 Schema；
 3. Query 执行和 Result QA 完成后，后端裁剪并脱敏结果；
 4. ModelClient 将问题、语义和结果与 MCP Tool Schemas 一起交给 Visualization Agent；
@@ -1453,8 +1453,6 @@ mini-hackathon/
 │   └── Mini Hackathon.md     # 产品与技术方案
 ├── scripts/
 │   └── generate_demo_data.py
-├── runtime/
-│   └── mcp-chart.json        # Transport、工具过滤和私有渲染配置
 └── Makefile                  # setup、dev、test、demo
 ```
 
@@ -1638,10 +1636,10 @@ Hackathon 结束时交付：
 6. 一个 DeepSeek/Kimi 模型适配器，并为 Gemini 迁移保留接口；
 7. 一份 OpenAPI 契约、A2UI v0.9.1 Schema、自定义 Analytics Chat Catalog、生成的 TypeScript Client 和可复用 Mock Stream；
 8. 一个 FastAPI 后端以及自动化的接口、A2UI 流、指标、映射、SQL Guard 和 MCP 集成测试；
-9. 一个本地 AntV MCP Server Chart Runtime、配置和图表资产缓存；
+9. 一个通过 `npx` 按需启动的 AntV MCP Server Chart、配置和图表资产缓存；
 10. 本文档、启动说明和 4–6 分钟 Demo 脚本。
 
-交付方式以单机可运行应用为主，不要求云部署。开发期运行 Vite、FastAPI 和 AntV MCP Server；交付时将 Vite 构建的静态产物交由 FastAPI 托管，并由启动脚本同时管理 FastAPI 与本地 MCP 进程。用户只访问一个产品地址，DuckDB、原始文件和图表缓存保存在本地。安装完成后通过 `make demo` 一条命令启动。
+交付方式以单机可运行应用为主，不要求云部署。开发期运行 Vite 和 FastAPI，FastAPI 在需要图表时通过 `npx` 启动短生命周期的 stdio MCP 子进程；交付时将 Vite 构建的静态产物交由 FastAPI 托管。用户只访问一个产品地址，DuckDB、原始文件和图表缓存保存在本地。安装完成后通过 `make demo` 一条命令启动。
 
 ## 21. 后续演进路线
 
@@ -1694,13 +1692,13 @@ Hackathon 结束时交付：
 | SQL 防护 | SQLGlot + 应用层白名单和执行限制 |
 | 指标层 | 轻量 Metric Catalog |
 | 可视化 | Visualization Agent 自主选择 `@antv/mcp-server-chart` Tool，无固定图表路由规则 |
-| MCP 部署 | Demo 使用本地 Streamable MCP；真实数据使用私有 `VIS_REQUEST_SERVER` |
+| MCP 部署 | Demo 通过 `npx` 按需启动 stdio MCP；真实数据使用私有 `VIS_REQUEST_SERVER` |
 | 工作流 | 显式 Python 流程，不使用 LangGraph |
 | 查询抽象 | MVP 不使用 Ibis |
 | 检索 | 小 Schema 直接注入上下文，不使用向量检索 |
 | Demo 模型 | DeepSeek / Kimi OpenAI-compatible API |
 | 生产模型 | 通过适配器迁移 Gemini |
-| 交付方式 | 前端构建产物由 FastAPI 托管，启动脚本管理 FastAPI 与 MCP，一个地址、一个命令启动 |
+| 交付方式 | 前端构建产物由 FastAPI 托管，AntV MCP 由后端按需通过 `npx` 调用，一个地址、一个命令启动 |
 
 ## 23. 选型参考
 

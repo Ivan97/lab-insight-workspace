@@ -1,11 +1,10 @@
 import hashlib
-import os
 from collections.abc import Callable
 from typing import Any
 
 import httpx
 from mcp import ClientSession
-from mcp.client.streamable_http import streamable_http_client
+from mcp.client.stdio import StdioServerParameters, stdio_client
 
 from .config import ARTIFACT_DIR
 from .model_client import OpenAICompatibleModel
@@ -15,7 +14,10 @@ ChartEventSink = Callable[[dict[str, Any]], None]
 
 class AntVChartClient:
     def __init__(self) -> None:
-        self.url = os.getenv("MCP_CHART_URL", "http://localhost:1122/mcp")
+        self.server = StdioServerParameters(
+            command="npx",
+            args=["-y", "@antv/mcp-server-chart"],
+        )
 
     async def render(
         self,
@@ -33,12 +35,7 @@ class AntVChartClient:
         selected_call_id: str | None = None
         try:
             async with (
-                httpx.AsyncClient(trust_env=False) as http_client,
-                streamable_http_client(self.url, http_client=http_client) as (
-                    read_stream,
-                    write_stream,
-                    _,
-                ),
+                stdio_client(self.server) as (read_stream, write_stream),
                 ClientSession(read_stream, write_stream) as session,
             ):
                 await session.initialize()

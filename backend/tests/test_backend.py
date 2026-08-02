@@ -12,6 +12,7 @@ from backend.app.cancellation import (
 )
 from backend.app.database import connection
 from backend.app.main import app
+from backend.app.mcp_chart import AntVChartClient
 from backend.app.model_client import (
     ANSWER_SYSTEM_PROMPT,
     VISUALIZATION_SYSTEM_PROMPT,
@@ -149,6 +150,19 @@ def test_visualization_is_selected_from_runtime_tools_not_planner_rules():
     assert "generate_line_chart" not in SYSTEM_PROMPT
     assert "dynamically discovered MCP tools" in VISUALIZATION_SYSTEM_PROMPT
     assert "selected tool's JSON Schema" in VISUALIZATION_SYSTEM_PROMPT
+
+
+def test_visualization_mcp_uses_on_demand_npx_stdio(client: TestClient):
+    chart_client = AntVChartClient()
+    assert chart_client.server.command == "npx"
+    assert chart_client.server.args == ["-y", "@antv/mcp-server-chart"]
+
+    visualization = client.get("/api/v1/health").json()["visualization_mcp"]
+    assert visualization == {
+        "status": "on-demand",
+        "transport": "stdio",
+        "command": ["npx", "-y", "@antv/mcp-server-chart"],
+    }
 
 
 def test_reference_tables_support_contract_and_budget_analysis(client: TestClient):

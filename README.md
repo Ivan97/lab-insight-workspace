@@ -11,7 +11,7 @@ make setup
 make demo
 ```
 
-Open [http://127.0.0.1:8000](http://127.0.0.1:8000) locally, or use the machine's LAN address from another device. The server listens on `0.0.0.0:8000`; the app initializes a deterministic 1,000-row laboratory dataset automatically and starts the local AntV MCP chart runtime.
+Open [http://127.0.0.1:8000](http://127.0.0.1:8000) locally, or use the machine's LAN address from another device. The server listens on `0.0.0.0:8000` and initializes a deterministic 1,000-row laboratory dataset automatically. When a chart is needed, the backend starts AntV MCP on demand with `npx -y @antv/mcp-server-chart` over stdio; no separate MCP port or long-running chart service is required.
 
 For frontend and backend hot reload during development:
 

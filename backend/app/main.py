@@ -61,7 +61,11 @@ def health() -> dict:
             "provider": os.getenv("LLM_PROVIDER", "not-configured"),
             "configured": model_configured,
         },
-        "visualization_mcp": {"status": "optional", "url": "http://127.0.0.1:1122/mcp"},
+        "visualization_mcp": {
+            "status": "on-demand",
+            "transport": "stdio",
+            "command": ["npx", "-y", "@antv/mcp-server-chart"],
+        },
     }
 
 
