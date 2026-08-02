@@ -1,10 +1,12 @@
 import asyncio
 import uuid
 from collections.abc import AsyncIterator
+from contextlib import suppress
 from datetime import UTC, datetime
 from typing import Any
 
 from .analysis import run_analysis
+from .cancellation import AnalysisCancelled, CancellationToken
 from .config import CATALOG_ID
 from .database import connection, json_dumps, utcnow
 from .mcp_chart import AntVChartClient
@@ -38,6 +40,7 @@ class A2UIStream:
         message_id: str | None = None,
         resume_after: int = 0,
         reasoning_enabled: bool = True,
+        cancellation_token: CancellationToken | None = None,
     ) -> None:
         self.conversation_id = conversation_id
         self.question = question
@@ -46,6 +49,7 @@ class A2UIStream:
         self.sequence = 0
         self.resume_after = resume_after
         self.reasoning_enabled = reasoning_enabled
+        self.cancellation_token = cancellation_token or CancellationToken()
         self.tool_sequence = 0
         self.tool_sequences: dict[str, int] = {}
         self.model: dict[str, Any] = {
@@ -87,7 +91,12 @@ class A2UIStream:
             loop.call_soon_threadsafe(event_queue.put_nowait, event)
 
         analysis_task = asyncio.create_task(
-            asyncio.to_thread(run_analysis, self.question, receive_analysis_event)
+            asyncio.to_thread(
+                run_analysis,
+                self.question,
+                receive_analysis_event,
+                self.cancellation_token,
+            )
         )
         try:
             while not analysis_task.done() or not event_queue.empty():
@@ -113,6 +122,9 @@ class A2UIStream:
                         )
                     )
             analysis = await analysis_task
+        except AnalysisCancelled:
+            yield self._sse(self._update("/status", "CANCELLED"))
+            return
         except Exception:  # noqa: BLE001 - stream failures must become visible UI state.
             async for event in self._failure_events(
                 "无法完成真实数据查询。请检查模型配置或换一种数据问题后重试。"
@@ -134,28 +146,34 @@ class A2UIStream:
             chart_task = asyncio.create_task(
                 chart_client.render(self.question, analysis, receive_chart_event)
             )
-            while not chart_task.done() or not chart_queue.empty():
-                try:
-                    event = await asyncio.wait_for(chart_queue.get(), timeout=0.05)
-                except TimeoutError:
-                    continue
-                if event["type"] == "reasoning_delta":
+            try:
+                while not chart_task.done() or not chart_queue.empty():
+                    try:
+                        event = await asyncio.wait_for(chart_queue.get(), timeout=0.05)
+                    except TimeoutError:
+                        continue
+                    if event["type"] == "reasoning_delta":
+                        yield self._sse(
+                            self._update_reasoning_delta(event["delta"], "RUNNING")
+                        )
+                        continue
+                    tool_call_id = event["tool_call_id"]
                     yield self._sse(
-                        self._update_reasoning_delta(event["delta"], "RUNNING")
+                        self._update_tool(
+                            tool_call_id,
+                            event["name"],
+                            event["status"],
+                            self._tool_sequence(tool_call_id),
+                            arguments=event.get("arguments"),
+                            result=event.get("result"),
+                        )
                     )
-                    continue
-                tool_call_id = event["tool_call_id"]
-                yield self._sse(
-                    self._update_tool(
-                        tool_call_id,
-                        event["name"],
-                        event["status"],
-                        self._tool_sequence(tool_call_id),
-                        arguments=event.get("arguments"),
-                        result=event.get("result"),
-                    )
-                )
-            visualization = await chart_task
+                visualization = await chart_task
+            finally:
+                if not chart_task.done():
+                    chart_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await chart_task
             if self._is_cancelled():
                 yield self._sse(self._update("/status", "CANCELLED"))
                 return
@@ -374,6 +392,8 @@ class A2UIStream:
             )
 
     def _is_cancelled(self) -> bool:
+        if self.cancellation_token.cancelled:
+            return True
         with connection() as conn:
             row = conn.execute(
                 "SELECT status FROM messages WHERE message_id = ?", [self.message_id]

@@ -1,10 +1,15 @@
 import json
+import threading
 
 import pytest
 from fastapi.testclient import TestClient
 
 from backend.app.a2ui import A2UIStream, validate_envelope
 from backend.app.analysis import run_analysis
+from backend.app.cancellation import (
+    register_cancellation,
+    unregister_cancellation,
+)
 from backend.app.database import connection
 from backend.app.main import app
 from backend.app.model_client import (
@@ -254,7 +259,7 @@ async def test_stream_is_ordered_and_completes(
         }
 
     monkeypatch.setattr("backend.app.a2ui.AntVChartClient.render", fake_render)
-    def fake_analysis(_question, event_sink):
+    def fake_analysis(_question, event_sink, _cancellation_token):
         event_sink({"type": "reasoning_delta", "delta": "按供应商聚合测试数量。"})
         event_sink({
             "type": "tool_result", "tool_call_id": "duckdb_query:1",
@@ -319,11 +324,19 @@ def test_cancel_streaming_message(client: TestClient):
     conversation = client.post("/api/v1/conversations").json()
     stream = A2UIStream(conversation["conversation_id"], "Compare vendors")
     stream._create_message()
-    response = client.post(
-        f"/api/v1/conversations/{conversation['conversation_id']}/messages/{stream.message_id}/cancel"
-    )
-    assert response.status_code == 202
-    assert response.json()["status"] == "CANCELLED"
+    token = register_cancellation(conversation["conversation_id"], stream.message_id)
+    interrupted = threading.Event()
+    token.add_callback(interrupted.set)
+    try:
+        response = client.post(
+            f"/api/v1/conversations/{conversation['conversation_id']}/messages/{stream.message_id}/cancel"
+        )
+        assert response.status_code == 202
+        assert response.json()["status"] == "CANCELLED"
+        assert interrupted.is_set()
+        assert token.cancelled
+    finally:
+        unregister_cancellation(stream.message_id, token)
 
 
 @pytest.mark.asyncio

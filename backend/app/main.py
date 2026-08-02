@@ -5,12 +5,13 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import polars as pl
-from fastapi import FastAPI, File, Header, HTTPException, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .a2ui import A2UIStream
+from .cancellation import cancel_active, register_cancellation, unregister_cancellation
 from .config import ARTIFACT_DIR, CATALOG_ID, DEMO_SOURCE_DIR, FRONTEND_DIST
 from .database import connection, init_schema, json_dumps, rows_as_dicts, utcnow
 from .demo_data import default_mappings, initialize_demo
@@ -321,7 +322,18 @@ def list_messages(conversation_id: str):
 
 
 @app.post("/api/v1/conversations/{conversation_id}/messages/{message_id}/cancel", status_code=202)
-def cancel_message(conversation_id: str, message_id: str):
+def cancel_message(
+    conversation_id: str, message_id: str, background_tasks: BackgroundTasks
+):
+    if cancel_active(conversation_id, message_id):
+        background_tasks.add_task(
+            _persist_cancelled_message, conversation_id, message_id
+        )
+        return {"message_id": message_id, "status": "CANCELLED"}
+    return _persist_cancelled_message(conversation_id, message_id)
+
+
+def _persist_cancelled_message(conversation_id: str, message_id: str) -> dict:
     with connection() as conn:
         row = conn.execute(
             "SELECT status FROM messages WHERE conversation_id = ? AND message_id = ?",
@@ -381,7 +393,7 @@ def stream_message(
         ).fetchone()
         if existing and existing[1] != request.question:
             raise HTTPException(409, "Idempotency-Key was already used for another question")
-        message_id = existing[0] if existing else str(uuid.uuid4())
+        message_id = existing[0] if existing else idempotency_key
         if not existing:
             conn.execute(
                 "INSERT INTO stream_requests VALUES (?, ?, ?, ?, ?)",
@@ -396,15 +408,26 @@ def stream_message(
                 "UPDATE messages SET status = 'STREAMING', completed_at = NULL WHERE message_id = ?",
                 [message_id],
             )
+    cancellation_token = register_cancellation(conversation_id, message_id)
     stream = A2UIStream(
         conversation_id,
         request.question,
         message_id=message_id,
         resume_after=resume_after,
         reasoning_enabled=request.reasoningEnabled,
+        cancellation_token=cancellation_token,
     )
+
+    async def stream_events():
+        try:
+            async for event in stream.events():
+                yield event
+        finally:
+            cancellation_token.cancel()
+            unregister_cancellation(message_id, cancellation_token)
+
     return StreamingResponse(
-        stream.events(),
+        stream_events(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

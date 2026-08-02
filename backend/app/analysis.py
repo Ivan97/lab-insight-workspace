@@ -5,6 +5,7 @@ from typing import Any
 
 import duckdb
 
+from .cancellation import CancellationToken
 from .database import connection, rows_as_dicts
 from .sql_guard import SQLGuardError, guard_sql
 from .text_to_sql import GeneratedPlan, TextToSQLPlanner
@@ -37,7 +38,10 @@ def _execute_plan(
     plan: GeneratedPlan,
     event_sink: AnalysisEventSink | None = None,
     attempt: int = 1,
+    cancellation_token: CancellationToken | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
+    if cancellation_token:
+        cancellation_token.raise_if_cancelled()
     if not plan.sql:
         raise ValueError("The generated plan does not contain SQL")
     guard_id = f"sql_guard:{attempt}"
@@ -79,9 +83,19 @@ def _execute_plan(
     })
     try:
         with connection() as conn:
-            conn.execute(f"EXPLAIN {guarded_sql}")
-            rows = rows_as_dicts(conn.execute(guarded_sql))
+            remove_interrupt = (
+                cancellation_token.add_callback(conn.interrupt)
+                if cancellation_token
+                else lambda: None
+            )
+            try:
+                conn.execute(f"EXPLAIN {guarded_sql}")
+                rows = rows_as_dicts(conn.execute(guarded_sql))
+            finally:
+                remove_interrupt()
     except Exception as exc:
+        if cancellation_token:
+            cancellation_token.raise_if_cancelled()
         _emit(event_sink, {
             "type": "tool_result",
             "tool_call_id": query_id,
@@ -119,35 +133,55 @@ def _to_json_value(value: Any) -> Any:
 
 
 def run_analysis(
-    question: str, event_sink: AnalysisEventSink | None = None
+    question: str,
+    event_sink: AnalysisEventSink | None = None,
+    cancellation_token: CancellationToken | None = None,
 ) -> dict[str, Any]:
     planner = TextToSQLPlanner()
-    reasoning_sink = lambda chunk: _emit(
-        event_sink, {"type": "reasoning_delta", "delta": chunk}
-    )
+    def reasoning_sink(chunk: str) -> None:
+        if cancellation_token:
+            cancellation_token.raise_if_cancelled()
+        _emit(event_sink, {"type": "reasoning_delta", "delta": chunk})
+
+    if cancellation_token:
+        cancellation_token.raise_if_cancelled()
     plan = planner.generate(question, reasoning_sink=reasoning_sink)
     if plan.clarification:
         return _empty_analysis(plan.clarification)
 
     try:
-        guarded_sql, rows = _execute_plan(plan, event_sink, attempt=1)
+        guarded_sql, rows = _execute_plan(
+            plan, event_sink, attempt=1, cancellation_token=cancellation_token
+        )
     except (SQLGuardError, duckdb.Error, ValueError) as exc:
+        if cancellation_token:
+            cancellation_token.raise_if_cancelled()
         plan = planner.generate(
             question, repair_context=str(exc), reasoning_sink=reasoning_sink
         )
         if plan.clarification:
             return _empty_analysis(plan.clarification)
-        guarded_sql, rows = _execute_plan(plan, event_sink, attempt=2)
+        guarded_sql, rows = _execute_plan(
+            plan, event_sink, attempt=2, cancellation_token=cancellation_token
+        )
 
     with connection() as conn:
-        total_tests, total_cost, pass_rate, turnaround = conn.execute(
-            """
-            SELECT count(*), round(sum(cost_usd), 2),
-                   round(100.0 * sum(CASE WHEN result = 'PASS' THEN 1 ELSE 0 END) / count(*), 1),
-                   round(avg(turnaround_days), 1)
-            FROM fact_test_results
-            """
-        ).fetchone()
+        remove_interrupt = (
+            cancellation_token.add_callback(conn.interrupt)
+            if cancellation_token
+            else lambda: None
+        )
+        try:
+            total_tests, total_cost, pass_rate, turnaround = conn.execute(
+                """
+                SELECT count(*), round(sum(cost_usd), 2),
+                       round(100.0 * sum(CASE WHEN result = 'PASS' THEN 1 ELSE 0 END) / count(*), 1),
+                       round(avg(turnaround_days), 1)
+                FROM fact_test_results
+                """
+            ).fetchone()
+        finally:
+            remove_interrupt()
 
     return {
         "answer": "The query completed successfully. Base the response only on its returned rows.",
