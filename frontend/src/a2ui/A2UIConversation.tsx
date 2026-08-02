@@ -5,7 +5,7 @@ import { analyticsCatalog, CATALOG_ID } from './catalog'
 import { api } from '../api'
 import { createUuid } from '../utils/id'
 
-export function A2UIConversation({ conversationId, question }: { conversationId: string; question: string }) {
+export function A2UIConversation({ conversationId, question, onStreamingChange }: { conversationId: string; question: string; onStreamingChange?: (streaming: boolean) => void }) {
   const processorRef = useRef(new MessageProcessor([analyticsCatalog], undefined, { version: 'v0.9.1' }))
   const [surfaces, setSurfaces] = useState<SurfaceModel<ReactComponentImplementation>[]>([])
   const [error, setError] = useState<string | null>(null)
@@ -21,11 +21,12 @@ export function A2UIConversation({ conversationId, question }: { conversationId:
     const controller = new AbortController()
     controllerRef.current = controller
     setStreaming(true)
+    onStreamingChange?.(true)
     void streamMessage(conversationId, question, controller.signal, setMessageId, (message) => {
       processor.processMessages([message])
       sync()
     }).catch((reason: unknown) => { if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : 'Unable to stream analysis') })
-      .finally(() => setStreaming(false))
+      .finally(() => { setStreaming(false); onStreamingChange?.(false) })
     return () => { controller.abort(); created.unsubscribe(); deleted.unsubscribe() }
   }, [conversationId, question])
 
@@ -33,9 +34,13 @@ export function A2UIConversation({ conversationId, question }: { conversationId:
   if (!surfaces.length) return <div className="assistant-loading"><i /><span>Creating analysis surface…</span></div>
   const cancel = async () => {
     if (!messageId) return
-    await api.cancelMessage(conversationId, messageId)
-    controllerRef.current?.abort()
-    setStreaming(false)
+    try {
+      await api.cancelMessage(conversationId, messageId)
+    } finally {
+      controllerRef.current?.abort()
+      setStreaming(false)
+      onStreamingChange?.(false)
+    }
   }
   return <div className="assistant-message">{surfaces.map((surface) => <A2uiSurface key={surface.id} surface={surface} />)}{streaming && messageId && <div className="stream-actions"><button onClick={() => void cancel()}>Stop response</button></div>}</div>
 }
