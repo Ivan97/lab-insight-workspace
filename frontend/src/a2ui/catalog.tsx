@@ -7,6 +7,7 @@ import remarkGfm from 'remark-gfm'
 import { z } from 'zod'
 import { Catalog, CommonSchemas } from '@a2ui/web_core/v0_9'
 import { Column, createComponentImplementation, type ReactComponentImplementation } from '@a2ui/react/v0_9'
+import { createUuid } from '../utils/id'
 
 export const CATALOG_ID = 'https://mini-hackathon.local/a2ui/catalogs/analytics-chat/v1'
 
@@ -114,7 +115,7 @@ function SafeImage({ src, alt }: { src?: string; alt: string }) {
 
 function MermaidDiagram({ source }: { source: string }) {
   const [svg, setSvg] = useState('')
-  const id = useMemo(() => `mermaid-${crypto.randomUUID()}`, [])
+  const id = useMemo(() => `mermaid-${createUuid()}`, [])
   useEffect(() => {
     void import('mermaid').then(({ default: mermaid }) => {
       mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: 'neutral' })

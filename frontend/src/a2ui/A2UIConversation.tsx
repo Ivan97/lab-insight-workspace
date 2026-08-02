@@ -3,6 +3,7 @@ import { A2uiSurface, type ReactComponentImplementation } from '@a2ui/react/v0_9
 import { MessageProcessor, type A2uiMessage, type SurfaceModel } from '@a2ui/web_core/v0_9'
 import { analyticsCatalog, CATALOG_ID } from './catalog'
 import { api } from '../api'
+import { createUuid } from '../utils/id'
 
 export function A2UIConversation({ conversationId, question }: { conversationId: string; question: string }) {
   const processorRef = useRef(new MessageProcessor([analyticsCatalog], undefined, { version: 'v0.9.1' }))
@@ -42,7 +43,7 @@ export function A2UIConversation({ conversationId, question }: { conversationId:
 async function streamMessage(conversationId: string, question: string, signal: AbortSignal, onMessageId: (messageId: string) => void, onMessage: (message: A2uiMessage) => void) {
   const response = await fetch(`/api/v1/conversations/${conversationId}/messages/stream`, {
     method: 'POST', signal,
-    headers: { 'Content-Type': 'application/json', 'Idempotency-Key': crypto.randomUUID() },
+    headers: { 'Content-Type': 'application/json', 'Idempotency-Key': createUuid() },
     body: JSON.stringify({ question, filters: {}, a2uiClientCapabilities: { supportedCatalogIds: [CATALOG_ID] } }),
   })
   if (!response.ok || !response.body) throw new Error(await response.text() || 'Streaming endpoint unavailable')
