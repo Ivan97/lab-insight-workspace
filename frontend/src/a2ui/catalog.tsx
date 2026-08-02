@@ -1,6 +1,6 @@
 /* oxlint-disable react/only-export-components */
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { BrainCircuit, Check, ChevronDown, ChevronRight, CircleAlert, LoaderCircle, Wrench } from 'lucide-react'
+import { BrainCircuit, Check, ChevronDown, ChevronRight, CircleAlert, CircleStop, LoaderCircle, Wrench } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import rehypeSanitize from 'rehype-sanitize'
 import remarkGfm from 'remark-gfm'
@@ -33,7 +33,7 @@ const ReasoningPanel = createComponentImplementation(ReasoningApi, ({ props }) =
 
   useEffect(() => {
     if (status === 'RUNNING' && previousStatus.current !== 'RUNNING') setExpanded(true)
-    if (status === 'COMPLETED' && !manuallyExpanded) {
+    if ((status === 'COMPLETED' || status === 'CANCELLED') && !manuallyExpanded) {
       const timer = window.setTimeout(() => setExpanded(false), 300)
       return () => window.clearTimeout(timer)
     }
@@ -44,7 +44,7 @@ const ReasoningPanel = createComponentImplementation(ReasoningApi, ({ props }) =
   return <section className={`reasoning-panel ${expanded ? 'expanded' : ''}`}>
     <button className="reasoning-summary" onClick={() => { setExpanded((value) => !value); setManuallyExpanded(!expanded) }}>
       <span className="reasoning-title"><BrainCircuit size={16} /> 思考 {status === 'RUNNING' && <LoaderCircle size={14} className="spin" />}</span>
-      <span className="reasoning-meta">{status === 'COMPLETED' ? '已完成' : '正在分析'} · {segments.length} 步</span>
+      <span className="reasoning-meta">{status === 'COMPLETED' ? '已完成' : status === 'CANCELLED' ? '已停止' : '正在分析'} · {segments.length} 步</span>
       <ChevronDown size={15} />
     </button>
     <div className="reasoning-content">{segments.map((segment) => <p key={segment.id}>{segment.text}</p>)}</div>
@@ -59,15 +59,16 @@ const ToolCallGroup = createComponentImplementation(ToolApi, ({ props }) => {
   if (!group?.calls.length) return null
   const calls = [...group.calls].sort((a, b) => a.sequence - b.sequence)
   const running = calls.some((call) => call.status === 'RUNNING')
+  const cancelled = calls.some((call) => call.status === 'CANCELLED')
   const label = calls.length === 1 ? calls[0].displayName : `已调用 ${calls.length} 个工具`
   return <section className="tool-group">
     <button className="tool-summary" onClick={() => setOpen((value) => !value)}>
-      <span>{running ? <LoaderCircle size={15} className="spin" /> : <Wrench size={15} />}{label}</span>
-      <span className="tool-state">{running ? '运行中' : '完成'} <ChevronRight size={14} /></span>
+      <span>{running ? <LoaderCircle size={15} className="spin" /> : cancelled ? <CircleStop size={15} /> : <Wrench size={15} />}{label}</span>
+      <span className="tool-state">{running ? '运行中' : cancelled ? '已停止' : '完成'} <ChevronRight size={14} /></span>
     </button>
     {open && <div className="tool-list">{calls.map((call) => <div className="tool-item" key={call.toolCallId}>
       <button onClick={() => setActive(active === call.toolCallId ? null : call.toolCallId)}>
-        {call.status === 'RUNNING' ? <LoaderCircle size={14} className="spin" /> : call.status === 'FAILED' ? <CircleAlert size={14} /> : <Check size={14} />}
+        {call.status === 'RUNNING' ? <LoaderCircle size={14} className="spin" /> : call.status === 'FAILED' ? <CircleAlert size={14} /> : call.status === 'CANCELLED' ? <CircleStop size={14} /> : <Check size={14} />}
         <span>{call.displayName}</span><small>{call.status.toLowerCase()}</small><ChevronDown size={13} />
       </button>
       {active === call.toolCallId && <div className="tool-detail"><span>Tool call</span><code>{call.toolCallId}</code><span>Output</span><p>{call.summary ?? 'Waiting for tool output…'}</p></div>}
