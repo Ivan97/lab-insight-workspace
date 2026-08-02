@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from backend.app.a2ui import A2UIStream, validate_envelope
 from backend.app.main import app
 from backend.app.model_client import OpenAICompatibleModel
+from backend.app.sql_guard import SQLGuardError, guard_sql
 
 
 @pytest.fixture
@@ -21,10 +22,26 @@ def test_demo_and_mapping_flow(client: TestClient):
     assert payload["total"] >= 3
     review_batch = next(item for item in payload["items"] if item["source_type"] == "XLSX")
     mapping = client.get(f"/api/v1/ingestions/{review_batch['batch_id']}/mapping").json()
+    profile = client.get(f"/api/v1/ingestions/{review_batch['batch_id']}/profile").json()
+    preview = client.get(f"/api/v1/ingestions/{review_batch['batch_id']}/preview").json()
+    assert profile["row_count"] == review_batch["record_count"]
+    assert profile["columns"]
+    assert preview["rows"]
     assert mapping["can_commit"] is True
     assert any(item["confidence"] < 0.8 for item in mapping["mappings"])
     committed = client.post(f"/api/v1/ingestions/{review_batch['batch_id']}/commit").json()
     assert committed["status"] == "READY"
+
+
+def test_sql_guard_accepts_analytics_and_rejects_unsafe_sql():
+    guarded = guard_sql("SELECT vendor, count(*) FROM fact_test_results GROUP BY vendor")
+    assert "fact_test_results" in guarded
+    with pytest.raises(SQLGuardError):
+        guard_sql("DROP TABLE fact_test_results")
+    with pytest.raises(SQLGuardError):
+        guard_sql("SELECT * FROM read_csv('secret.csv')")
+    with pytest.raises(SQLGuardError):
+        guard_sql("SELECT * FROM internal_users")
 
 
 def test_a2ui_envelope_shape():
@@ -57,6 +74,24 @@ async def test_stream_is_ordered_and_completes(monkeypatch):
     ]
     assert "createSurface" in envelopes[0]
     assert envelopes[-1]["updateDataModel"]["value"] == "COMPLETED"
+    with TestClient(app) as client:
+        history = client.get(
+            f"/api/v1/conversations/{conversation['conversation_id']}/messages"
+        ).json()
+    assert history["total"] == 2
+    assert history["items"][-1]["status"] == "COMPLETED"
+    assert history["items"][-1]["a2ui_surface_snapshot"]["status"] == "COMPLETED"
+
+
+def test_cancel_streaming_message(client: TestClient):
+    conversation = client.post("/api/v1/conversations").json()
+    stream = A2UIStream(conversation["conversation_id"], "Compare vendors")
+    stream._create_message()
+    response = client.post(
+        f"/api/v1/conversations/{conversation['conversation_id']}/messages/{stream.message_id}/cancel"
+    )
+    assert response.status_code == 202
+    assert response.json()["status"] == "CANCELLED"
 
 
 @pytest.mark.asyncio

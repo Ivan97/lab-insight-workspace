@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .database import connection, rows_as_dicts
+from .sql_guard import guard_sql
 
 
 @dataclass(frozen=True)
@@ -70,8 +71,9 @@ def choose_plan(question: str) -> AnalysisPlan:
 
 def run_analysis(question: str) -> dict[str, Any]:
     plan = choose_plan(question)
+    guarded_sql = guard_sql(plan.sql)
     with connection() as conn:
-        rows = rows_as_dicts(conn.execute(plan.sql))
+        rows = rows_as_dicts(conn.execute(guarded_sql))
         total_tests, total_cost, pass_rate, turnaround = conn.execute(
             """
             SELECT count(*), round(sum(cost_usd), 2),
@@ -142,7 +144,7 @@ def run_analysis(question: str) -> dict[str, Any]:
             "truncated": False,
         },
         "insights": insights,
-        "sql": " ".join(plan.sql.split()),
+        "sql": guarded_sql,
         "visualization": {
             "status": "PENDING",
             "tool_name": plan.tool_name,

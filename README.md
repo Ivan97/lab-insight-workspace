@@ -2,6 +2,8 @@
 
 Prism is a local-first data product for turning heterogeneous supplier files and unstructured updates into a trusted canonical schema, natural-language analysis, charts, and explainable insights.
 
+The shipped MVP includes reviewable source profiling and row previews, canonical field mapping, SQLGlot AST-based read-only query protection, persistent multi-turn A2UI conversations with cancellation, and agent-selected AntV MCP charts.
+
 ## Run the product
 
 ```bash

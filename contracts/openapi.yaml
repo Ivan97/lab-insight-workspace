@@ -126,6 +126,37 @@ paths:
           content:
             application/json:
               schema: {$ref: "#/components/schemas/MappingDraft"}
+  /ingestions/{batch_id}/profile:
+    get:
+      summary: Read the source data profile
+      operationId: getIngestionProfile
+      parameters:
+        - {name: batch_id, in: path, required: true, schema: {type: string}}
+      responses:
+        "200":
+          description: Column-level profile for review
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/DataProfile"}
+  /ingestions/{batch_id}/preview:
+    get:
+      summary: Preview original source rows
+      operationId: getIngestionPreview
+      parameters:
+        - {name: batch_id, in: path, required: true, schema: {type: string}}
+        - {name: limit, in: query, required: false, schema: {type: integer, minimum: 1, maximum: 100, default: 20}}
+      responses:
+        "200":
+          description: Bounded source preview
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [rows, row_count, limit]
+                properties:
+                  rows: {type: array, items: {type: object, additionalProperties: true}}
+                  row_count: {type: integer}
+                  limit: {type: integer}
   /ingestions/{batch_id}/commit:
     post:
       summary: Publish an ingestion batch
@@ -167,6 +198,58 @@ paths:
           content:
             text/event-stream:
               schema: {type: string}
+  /conversations/{conversation_id}/messages:
+    get:
+      summary: List persisted conversation messages
+      operationId: listMessages
+      parameters:
+        - {name: conversation_id, in: path, required: true, schema: {type: string}}
+      responses:
+        "200":
+          description: Conversation history with completed A2UI snapshots
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, total]
+                properties:
+                  items: {type: array, items: {$ref: "#/components/schemas/Message"}}
+                  total: {type: integer}
+  /conversations/{conversation_id}/messages/{message_id}/cancel:
+    post:
+      summary: Cancel an active response stream
+      operationId: cancelMessage
+      parameters:
+        - {name: conversation_id, in: path, required: true, schema: {type: string}}
+        - {name: message_id, in: path, required: true, schema: {type: string}}
+      responses:
+        "202":
+          description: Cancellation accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [message_id, status]
+                properties:
+                  message_id: {type: string}
+                  status: {type: string}
+  /conversations/{conversation_id}/a2ui/actions:
+    post:
+      summary: Handle a standard A2UI surface action
+      operationId: handleA2UIAction
+      parameters:
+        - {name: conversation_id, in: path, required: true, schema: {type: string}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/A2UIActionRequest"}
+      responses:
+        "202":
+          description: Action accepted
+          content:
+            application/json:
+              schema: {type: object}
   /analysis/suggestions:
     get:
       summary: List suggested analysis questions
@@ -246,6 +329,25 @@ components:
         mappings: {type: array, items: {$ref: "#/components/schemas/FieldMapping"}}
         missing_required_fields: {type: array, items: {type: string}}
         can_commit: {type: boolean}
+    DataProfile:
+      type: object
+      required: [row_count, column_count, columns, warnings]
+      properties:
+        row_count: {type: integer}
+        column_count: {type: integer}
+        warnings: {type: array, items: {type: string}}
+        columns:
+          type: array
+          items:
+            type: object
+            required: [name, inferred_type, null_rate, distinct_count, sample_values, warnings]
+            properties:
+              name: {type: string}
+              inferred_type: {type: string}
+              null_rate: {type: number, minimum: 0, maximum: 1}
+              distinct_count: {type: integer}
+              sample_values: {type: array}
+              warnings: {type: array, items: {type: string}}
     Conversation:
       type: object
       required: [conversation_id, title, created_at, updated_at]
@@ -267,3 +369,22 @@ components:
             supportedCatalogIds:
               type: array
               items: {type: string}
+    Message:
+      type: object
+      required: [message_id, role, content, status, created_at]
+      properties:
+        message_id: {type: string}
+        role: {type: string, enum: [USER, ASSISTANT]}
+        content: {type: string}
+        status: {type: string, enum: [STREAMING, COMPLETED, CANCELLED, FAILED]}
+        a2ui_surface_snapshot: {type: [object, "null"]}
+        created_at: {type: string, format: date-time}
+        completed_at: {type: [string, "null"], format: date-time}
+    A2UIActionRequest:
+      type: object
+      required: [surface_id, action_id, name]
+      properties:
+        surface_id: {type: string}
+        action_id: {type: string}
+        name: {type: string}
+        context: {type: object}

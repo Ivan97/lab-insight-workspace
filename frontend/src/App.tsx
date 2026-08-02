@@ -16,7 +16,7 @@ import {
   Upload,
 } from 'lucide-react'
 import { A2UIConversation } from './a2ui/A2UIConversation'
-import { api, type Ingestion, type MappingDraft } from './api'
+import { api, type DataPreview, type DataProfile, type Ingestion, type MappingDraft } from './api'
 import './App.css'
 
 type Page = 'sources' | 'schema' | 'analyze'
@@ -141,9 +141,18 @@ function SourceRow({ source, openReview }: { source: Ingestion; openReview: (id:
 
 function SchemaPage({ sources, batchId, onCommitted, onAnalyze }: { sources: Ingestion[]; batchId: string | null; onCommitted: () => Promise<void>; onAnalyze: () => void }) {
   const [mapping, setMapping] = useState<MappingDraft | null>(null)
+  const [profile, setProfile] = useState<DataProfile | null>(null)
+  const [preview, setPreview] = useState<DataPreview | null>(null)
+  const [reviewTab, setReviewTab] = useState<'profile' | 'preview'>('profile')
   const source = sources.find((item) => item.batch_id === batchId) ?? sources[0]
   const sourceId = source?.batch_id
-  useEffect(() => { if (sourceId) void api.getMapping(sourceId).then(setMapping) }, [sourceId])
+  useEffect(() => {
+    if (!sourceId) return
+    setMapping(null); setProfile(null); setPreview(null)
+    void Promise.all([api.getMapping(sourceId), api.getProfile(sourceId), api.getPreview(sourceId)]).then(([nextMapping, nextProfile, nextPreview]) => {
+      setMapping(nextMapping); setProfile(nextProfile); setPreview(nextPreview)
+    })
+  }, [sourceId])
 
   const updateTarget = (index: number, target: string) => setMapping((current) => current && ({ ...current, mappings: current.mappings.map((item, itemIndex) => itemIndex === index ? { ...item, target_field: target, status: 'MODIFIED' } : item) }))
   const commit = async () => {
@@ -158,6 +167,10 @@ function SchemaPage({ sources, batchId, onCommitted, onAnalyze }: { sources: Ing
   return <div className="page schema-page">
     <section className="page-heading"><span className="eyebrow">SCHEMA REVIEW</span><h1>Make the meaning explicit.</h1><p>Review AI suggestions before anything enters the trusted analysis layer.</p></section>
     <section className="review-summary section-card"><div className="source-name"><div className="file-icon xlsx">XLSX</div><div><strong>{source.source_name}</strong><small>{source.record_count} records · mapping version {mapping.version}</small></div></div><div className="review-progress"><span>{mapping.mappings.filter((item) => item.confidence >= .8).length} auto-mapped</span><span>{mapping.mappings.filter((item) => item.confidence < .8).length} need attention</span></div></section>
+    {profile && preview && <section className="section-card data-review-card">
+      <div className="review-tabs" role="tablist"><button className={reviewTab === 'profile' ? 'active' : ''} onClick={() => setReviewTab('profile')}>Data profile</button><button className={reviewTab === 'preview' ? 'active' : ''} onClick={() => setReviewTab('preview')}>Source preview</button><span>{profile.row_count.toLocaleString()} rows · {profile.column_count} fields</span></div>
+      {reviewTab === 'profile' ? <div className="profile-grid">{profile.columns.map((column) => <article key={column.name}><div><code>{column.name}</code><span>{column.inferred_type}</span></div><strong>{Math.round(column.null_rate * 100)}% <small>null</small></strong><p>{column.distinct_count.toLocaleString()} distinct · {column.sample_values.map(String).join(', ') || 'No sample'}</p>{column.warnings[0] && <em>{column.warnings[0]}</em>}</article>)}</div> : <div className="preview-scroll"><table><thead><tr>{Object.keys(preview.rows[0] ?? {}).map((key) => <th key={key}>{key}</th>)}</tr></thead><tbody>{preview.rows.map((row, index) => <tr key={index}>{Object.keys(preview.rows[0] ?? {}).map((key) => <td key={key}>{String(row[key] ?? '—')}</td>)}</tr>)}</tbody></table></div>}
+    </section>}
     <section className="section-card mapping-card">
       <div className="section-header"><div><h2>Field mapping</h2><p>Original fields remain unchanged. These rules create the canonical view.</p></div><span className="status-badge review"><Activity size={13} /> Review required</span></div>
       <div className="mapping-table">
@@ -177,18 +190,18 @@ function SchemaPage({ sources, batchId, onCommitted, onAnalyze }: { sources: Ing
 function AnalyzePage() {
   const [conversationId, setConversationId] = useState<string | null>(null)
   const [question, setQuestion] = useState('Compare cost, pass rate and turnaround time by vendor')
-  const [submitted, setSubmitted] = useState<string | null>(null)
+  const [turns, setTurns] = useState<string[]>([])
   const suggestions = useMemo(() => [
     'Compare cost, pass rate and turnaround time by vendor',
     'What cost trends or anomalies appeared in recent months?',
     'Which materials have the highest failure rate?',
   ], [])
   useEffect(() => { void api.createConversation().then((value) => setConversationId(value.conversation_id)) }, [])
-  const ask = (value = question) => { if (value.trim() && conversationId) { setQuestion(value); setSubmitted(value) } }
+  const ask = (value = question) => { if (value.trim() && conversationId) { setQuestion(''); setTurns((current) => [...current, value.trim()]) } }
   return <div className="page analyze-page">
     <section className="analyze-hero"><div><span className="eyebrow">ASK & ANALYZE</span><h1>What would you like to understand?</h1><p>Ask across every trusted source. Prism will show its work, use the right tools, and surface the decision—not just the numbers.</p></div></section>
-    {!submitted && <div className="suggestion-grid">{suggestions.map((item, index) => <button key={item} onClick={() => ask(item)}><span className={`suggestion-icon s${index}`}><LayoutDashboard size={18} /></span><strong>{['Compare vendor performance','Find recent anomalies','Inspect quality risk'][index]}</strong><small>{item}</small><ArrowRight size={16} /></button>)}</div>}
-    {submitted && conversationId && <div className="conversation"><div className="user-message">{submitted}</div><A2UIConversation key={submitted} conversationId={conversationId} question={submitted} /></div>}
+    {!turns.length && <div className="suggestion-grid">{suggestions.map((item, index) => <button key={item} onClick={() => ask(item)}><span className={`suggestion-icon s${index}`}><LayoutDashboard size={18} /></span><strong>{['Compare vendor performance','Find recent anomalies','Inspect quality risk'][index]}</strong><small>{item}</small><ArrowRight size={16} /></button>)}</div>}
+    {conversationId && turns.map((turn, index) => <div className="conversation" key={`${index}-${turn}`}><div className="user-message">{turn}</div><A2UIConversation conversationId={conversationId} question={turn} /></div>)}
     <div className="composer-wrap"><div className="composer"><Sparkles size={18} /><textarea rows={1} value={question} onChange={(event) => setQuestion(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); ask() } }} aria-label="Ask a question" /><button onClick={() => ask()} aria-label="Send question"><ArrowRight size={18} /></button></div><span>Answers use published data only. SQL and metric definitions remain available for review.</span></div>
   </div>
 }

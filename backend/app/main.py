@@ -14,7 +14,9 @@ from .a2ui import A2UIStream
 from .config import ARTIFACT_DIR, CATALOG_ID, FRONTEND_DIST
 from .database import connection, init_schema, json_dumps, rows_as_dicts, utcnow
 from .demo_data import default_mappings, initialize_demo
+from .profiling import preview_frame, profile_frame, profile_text
 from .schemas import (
+    A2UIActionRequest,
     Conversation,
     CreateMessageRequest,
     IngestionBatch,
@@ -140,6 +142,10 @@ async def upload_file(file: UploadFile = File(...), vendor_hint: str | None = No
         conn.execute(
             "INSERT INTO field_mappings VALUES (?, 1, ?)", [batch_id, json_dumps(mappings)]
         )
+        conn.execute(
+            "INSERT INTO ingestion_payloads VALUES (?, ?, ?)",
+            [batch_id, json_dumps(profile_frame(frame)), json_dumps(preview_frame(frame))],
+        )
     return get_ingestion(batch_id)
 
 
@@ -149,6 +155,7 @@ def ingest_text(request: TextIngestionRequest):
     now = utcnow()
     count = max(1, len([line for line in request.content.splitlines() if line.strip()]))
     mappings = default_mappings(batch_id, "TEXT")
+    profile, preview = profile_text(request.content)
     with connection() as conn:
         conn.execute(
             "INSERT INTO ingestion_batches VALUES (?, 'TEXT', ?, ?, 'NEEDS_REVIEW', ?, 80, 'Review extracted fields', ?, ?)",
@@ -157,7 +164,36 @@ def ingest_text(request: TextIngestionRequest):
         conn.execute(
             "INSERT INTO field_mappings VALUES (?, 1, ?)", [batch_id, json_dumps(mappings)]
         )
+        conn.execute(
+            "INSERT INTO ingestion_payloads VALUES (?, ?, ?)",
+            [batch_id, json_dumps(profile), json_dumps(preview)],
+        )
     return get_ingestion(batch_id)
+
+
+@app.get("/api/v1/ingestions/{batch_id}/profile")
+def get_profile(batch_id: str):
+    with connection() as conn:
+        row = conn.execute(
+            "SELECT profile FROM ingestion_payloads WHERE batch_id = ?", [batch_id]
+        ).fetchone()
+    if not row:
+        raise HTTPException(404, "Profile not found")
+    return json.loads(row[0])
+
+
+@app.get("/api/v1/ingestions/{batch_id}/preview")
+def get_preview(batch_id: str, limit: int = 20):
+    if not 1 <= limit <= 100:
+        raise HTTPException(422, "limit must be between 1 and 100")
+    with connection() as conn:
+        row = conn.execute(
+            "SELECT preview FROM ingestion_payloads WHERE batch_id = ?", [batch_id]
+        ).fetchone()
+    if not row:
+        raise HTTPException(404, "Preview not found")
+    rows = json.loads(row[0])[:limit]
+    return {"rows": rows, "row_count": len(rows), "limit": limit}
 
 
 @app.get("/api/v1/ingestions/{batch_id}/mapping", response_model=MappingDraft)
@@ -216,6 +252,65 @@ def create_conversation():
         "created_at": now,
         "updated_at": now,
     }
+
+
+@app.get("/api/v1/conversations/{conversation_id}/messages")
+def list_messages(conversation_id: str):
+    with connection() as conn:
+        exists = conn.execute(
+            "SELECT 1 FROM conversations WHERE conversation_id = ?", [conversation_id]
+        ).fetchone()
+        if not exists:
+            raise HTTPException(404, "Conversation not found")
+        items = rows_as_dicts(
+            conn.execute(
+                """
+                SELECT message_id, role, content, status, a2ui_surface_snapshot,
+                       created_at, completed_at
+                FROM messages WHERE conversation_id = ?
+                ORDER BY created_at, CASE role WHEN 'USER' THEN 0 ELSE 1 END, message_id
+                """,
+                [conversation_id],
+            )
+        )
+    for item in items:
+        snapshot = item.get("a2ui_surface_snapshot")
+        if isinstance(snapshot, str):
+            item["a2ui_surface_snapshot"] = json.loads(snapshot)
+    return {"items": items, "total": len(items)}
+
+
+@app.post("/api/v1/conversations/{conversation_id}/messages/{message_id}/cancel", status_code=202)
+def cancel_message(conversation_id: str, message_id: str):
+    with connection() as conn:
+        row = conn.execute(
+            "SELECT status FROM messages WHERE conversation_id = ? AND message_id = ?",
+            [conversation_id, message_id],
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "Message not found")
+        if row[0] == "STREAMING":
+            conn.execute(
+                "UPDATE messages SET status = 'CANCELLED', completed_at = ? WHERE message_id = ?",
+                [utcnow(), message_id],
+            )
+    return {"message_id": message_id, "status": "CANCELLED" if row[0] == "STREAMING" else row[0]}
+
+
+@app.post("/api/v1/conversations/{conversation_id}/a2ui/actions", status_code=202)
+def handle_a2ui_action(conversation_id: str, request: A2UIActionRequest):
+    expected_prefix = "message:"
+    if not request.surface_id.startswith(expected_prefix):
+        raise HTTPException(422, "Unknown A2UI surface")
+    message_id = request.surface_id.removeprefix(expected_prefix)
+    with connection() as conn:
+        exists = conn.execute(
+            "SELECT 1 FROM messages WHERE conversation_id = ? AND message_id = ?",
+            [conversation_id, message_id],
+        ).fetchone()
+    if not exists:
+        raise HTTPException(404, "A2UI surface not found")
+    return {"accepted": True, "action_id": request.action_id, "name": request.name}
 
 
 @app.post("/api/v1/conversations/{conversation_id}/messages/stream")

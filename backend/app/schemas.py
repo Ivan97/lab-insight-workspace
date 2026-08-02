@@ -60,3 +60,10 @@ class CreateMessageRequest(BaseModel):
     question: str = Field(min_length=1, max_length=1_000)
     filters: dict[str, Any] = Field(default_factory=dict)
     a2uiClientCapabilities: A2UIClientCapabilities
+
+
+class A2UIActionRequest(BaseModel):
+    surface_id: str
+    action_id: str
+    name: str
+    context: dict[str, Any] = Field(default_factory=dict)

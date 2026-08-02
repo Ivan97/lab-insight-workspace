@@ -43,6 +43,11 @@ def init_schema() -> None:
                 version INTEGER NOT NULL,
                 payload JSON NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS ingestion_payloads (
+                batch_id VARCHAR PRIMARY KEY,
+                profile JSON NOT NULL,
+                preview JSON NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS fact_test_results (
                 test_result_id VARCHAR PRIMARY KEY,
                 vendor VARCHAR NOT NULL,

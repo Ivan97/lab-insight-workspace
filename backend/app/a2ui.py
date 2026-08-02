@@ -83,6 +83,9 @@ class A2UIStream:
             self._update_reasoning("已锁定统一分析视图，正在执行只读聚合查询。", "RUNNING")
         )
         analysis = await asyncio.to_thread(run_analysis, self.question)
+        if self._is_cancelled():
+            yield self._sse(self._update("/status", "CANCELLED"))
+            return
         yield self._sse(
             self._update_tool(
                 "query", "Query DuckDB", "COMPLETED", 1, "Returned trusted aggregate rows"
@@ -97,6 +100,9 @@ class A2UIStream:
             )
         )
         visualization = await AntVChartClient().render(analysis["visualization"])
+        if self._is_cancelled():
+            yield self._sse(self._update("/status", "CANCELLED"))
+            return
         analysis["visualization"] = visualization
         yield self._sse(
             self._update_tool(
@@ -114,6 +120,9 @@ class A2UIStream:
         markdown = ""
         body_chunk_count = 0
         async for chunk in OpenAICompatibleModel().stream_answer(self.question, analysis):
+            if self._is_cancelled():
+                yield self._sse(self._update("/status", "CANCELLED"))
+                return
             body_chunk_count += 1
             markdown += chunk
             self.model["content"]["markdown"] = markdown
@@ -208,6 +217,13 @@ class A2UIStream:
                     self.message_id,
                 ],
             )
+
+    def _is_cancelled(self) -> bool:
+        with connection() as conn:
+            row = conn.execute(
+                "SELECT status FROM messages WHERE message_id = ?", [self.message_id]
+            ).fetchone()
+        return bool(row and row[0] == "CANCELLED")
 
 
 def validate_envelope(envelope: dict[str, Any]) -> None:

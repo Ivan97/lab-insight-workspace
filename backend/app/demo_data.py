@@ -1,3 +1,4 @@
+import json
 import random
 import uuid
 from datetime import date, timedelta
@@ -21,6 +22,7 @@ def initialize_demo(seed: int = 20260802) -> tuple[bool, int, list[str]]:
     with connection() as conn:
         count = conn.execute("SELECT count(*) FROM fact_test_results").fetchone()[0]
         if count:
+            _ensure_demo_payloads(conn)
             batches = [
                 row[0] for row in conn.execute("SELECT batch_id FROM ingestion_batches").fetchall()
             ]
@@ -93,7 +95,46 @@ def initialize_demo(seed: int = 20260802) -> tuple[bool, int, list[str]]:
             conn.execute(
                 "INSERT INTO field_mappings VALUES (?, 1, ?)", [batch_id, json_dumps(mappings)]
             )
+        _ensure_demo_payloads(conn)
         return True, len(records), batches
+
+
+def _ensure_demo_payloads(conn) -> None:
+    rows = conn.execute(
+        """
+        SELECT b.batch_id, b.record_count, m.payload
+        FROM ingestion_batches b
+        JOIN field_mappings m USING (batch_id)
+        LEFT JOIN ingestion_payloads p USING (batch_id)
+        WHERE p.batch_id IS NULL
+        """
+    ).fetchall()
+    for batch_id, record_count, payload in rows:
+        mappings = json.loads(payload)
+        columns = [
+            {
+                "name": item["source_field"],
+                "inferred_type": "String",
+                "null_rate": 0.0,
+                "distinct_count": min(record_count, 48),
+                "sample_values": item.get("sample_before", []),
+                "warnings": item.get("warnings", []),
+            }
+            for item in mappings
+        ]
+        preview = [
+            {item["source_field"]: (item.get("sample_before") or ["Example value"])[0] for item in mappings}
+        ]
+        profile = {
+            "row_count": record_count,
+            "column_count": len(columns),
+            "columns": columns,
+            "warnings": [],
+        }
+        conn.execute(
+            "INSERT INTO ingestion_payloads VALUES (?, ?, ?)",
+            [batch_id, json_dumps(profile), json_dumps(preview)],
+        )
 
 
 def default_mappings(batch_id: str, source_type: str) -> list[dict]:
