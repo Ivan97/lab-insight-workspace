@@ -69,10 +69,12 @@ export function A2UIConversation({ conversationId, question, reasoningEnabled, o
     }
     notifyCancelReady(cancel)
     void streamMessage(conversationId, question, reasoningEnabled, requestId, controller.signal, (messageId) => { messageIdRef.current = messageId }, (message) => {
-      const update = (message as { updateDataModel?: { path?: string; value?: unknown } }).updateDataModel
+      const displayMessage = reasoningEnabled ? message : withoutReasoning(message)
+      if (!displayMessage) return
+      const update = (displayMessage as { updateDataModel?: { path?: string; value?: unknown } }).updateDataModel
       if (update?.path === '/toolGroups/analysis') toolGroupRef.current = update.value as Record<string, unknown>
       if (update?.path === '/events') eventStreamRef.current = update.value as Record<string, unknown>[]
-      processor.processMessages([message])
+      processor.processMessages([displayMessage])
       sync()
     }).catch((reason: unknown) => { if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : 'Unable to stream analysis') })
       .finally(() => { notifyCancelReady(null); notifyStreaming(false) })
@@ -83,6 +85,21 @@ export function A2UIConversation({ conversationId, question, reasoningEnabled, o
   if (cancelled && !surfaces.length) return <div className="assistant-message stream-cancelled">Response stopped.</div>
   if (!surfaces.length) return <div className="assistant-loading"><i /><span>Creating analysis surface…</span></div>
   return <div className="assistant-message">{surfaces.map((surface) => <A2uiSurface key={surface.id} surface={surface} />)}</div>
+}
+
+function withoutReasoning(message: A2uiMessage): A2uiMessage | null {
+  const envelope = message as A2uiMessage & { updateDataModel?: { path?: string; value?: unknown } }
+  const update = envelope.updateDataModel
+  if (!update) return message
+  if (update.path?.startsWith('/reasoning')) return null
+  if (update.path !== '/events' || !Array.isArray(update.value)) return message
+  return {
+    ...message,
+    updateDataModel: {
+      ...update,
+      value: update.value.filter((event) => !(event && typeof event === 'object' && (event as { type?: string }).type === 'reasoning')),
+    },
+  } as A2uiMessage
 }
 
 async function streamMessage(conversationId: string, question: string, reasoningEnabled: boolean, requestId: string, signal: AbortSignal, onMessageId: (messageId: string) => void, onMessage: (message: A2uiMessage) => void) {
