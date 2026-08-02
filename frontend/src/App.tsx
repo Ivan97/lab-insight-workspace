@@ -37,6 +37,7 @@ const canonicalFields = [
   'completed_date', 'lab_vendor', 'contract_tier', 'region', 'contracted_cost_usd',
   'sla_days', 'quality_target_pct', 'owner', 'priority', 'approved_budget_usd',
   'start_date', 'end_date',
+  'material_family', 'target_failure_pct', 'max_avg_cost_usd', 'risk_tier',
 ]
 
 export default function App() {

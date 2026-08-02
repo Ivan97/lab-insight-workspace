@@ -28,6 +28,7 @@ DEMO_SOURCES = [
     ("TEXT", "slack-lab-updates.txt", None, "READY", 42, 91),
     ("CSV", "vendor-contracts.csv", "Contract reference", "READY", 6, 99),
     ("XLSX", "project-budgets.xlsx", "Portfolio planning", "READY", 10, 97),
+    ("CSV", "material-quality-targets.csv", "Quality standards", "READY", 5, 99),
 ]
 
 VENDOR_CONTRACTS = [
@@ -49,6 +50,14 @@ PROJECT_BUDGETS = [
         [date(2026, 8, 31), date(2026, 9, 30), date(2026, 10, 31)][index % 3],
     )
     for index, project in enumerate(PROJECTS)
+]
+
+MATERIAL_STANDARDS = [
+    ("Alloy-X", "Metals", 8.0, 105.0, "Low"),
+    ("Polymer-A", "Polymers", 12.0, 100.0, "High"),
+    ("Ceramic-C", "Ceramics", 9.0, 110.0, "Medium"),
+    ("Composite-Z", "Composites", 10.0, 115.0, "Medium"),
+    ("Copper-M", "Metals", 7.0, 108.0, "Low"),
 ]
 
 DEMO_FIELD_SAMPLES = {
@@ -85,6 +94,13 @@ DEMO_FIELD_SAMPLES = {
         "approved_budget_usd": [8500.0, 10250.0],
         "start_date": ["2026-01-01", "2026-02-01"],
         "end_date": ["2026-08-31", "2026-09-30"],
+    },
+    "material-quality-targets.csv": {
+        "material": ["Alloy-X", "Polymer-A"],
+        "material_family": ["Metals", "Polymers"],
+        "target_failure_pct": [8.0, 12.0],
+        "max_avg_cost_usd": [105.0, 100.0],
+        "risk_tier": ["Low", "High"],
     },
 }
 
@@ -136,6 +152,10 @@ def _ensure_reference_tables(conn) -> None:
     for row in PROJECT_BUDGETS:
         conn.execute(
             "INSERT OR REPLACE INTO dim_project_budgets VALUES (?, ?, ?, ?, ?, ?)", row
+        )
+    for row in MATERIAL_STANDARDS:
+        conn.execute(
+            "INSERT OR REPLACE INTO dim_material_standards VALUES (?, ?, ?, ?, ?)", row
         )
 
 
@@ -256,7 +276,15 @@ def _load_demo_preview(source_name: str, limit: int = 20) -> list[dict]:
 
 
 def default_mappings(batch_id: str, source_type: str, source_name: str = "") -> list[dict]:
-    if source_name == "vendor-contracts.csv":
+    if source_name == "material-quality-targets.csv":
+        fields = [
+            ("material", "material", 0.99, "TRIM", []),
+            ("material_family", "material_family", 0.99, "TRIM", []),
+            ("target_failure_pct", "target_failure_pct", 0.99, "PARSE_PERCENT", []),
+            ("max_avg_cost_usd", "max_avg_cost_usd", 0.99, "PARSE_MONEY", []),
+            ("risk_tier", "risk_tier", 0.98, "MAP_ENUM", []),
+        ]
+    elif source_name == "vendor-contracts.csv":
         fields = [
             ("vendor", "vendor", 0.99, "TRIM", []),
             ("contract_tier", "contract_tier", 0.98, "MAP_ENUM", []),

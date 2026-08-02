@@ -10,6 +10,7 @@ ANALYTICAL_TABLES = {
     "fact_test_results",
     "dim_vendor_contracts",
     "dim_project_budgets",
+    "dim_material_standards",
 }
 IDENTIFIER = re.compile(r"^[a-z_][a-z0-9_]*$")
 
@@ -29,6 +30,15 @@ DEFAULT_RULES = [
         "left_field": "project",
         "right_table": "dim_project_budgets",
         "right_field": "project",
+        "join_type": "LEFT",
+        "relationship": "MANY_TO_ONE",
+    },
+    {
+        "name": "Tests to material quality targets",
+        "left_table": BASE_TABLE,
+        "left_field": "material",
+        "right_table": "dim_material_standards",
+        "right_field": "material",
         "join_type": "LEFT",
         "relationship": "MANY_TO_ONE",
     },

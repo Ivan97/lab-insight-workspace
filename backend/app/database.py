@@ -94,6 +94,13 @@ def init_schema() -> None:
                 start_date DATE NOT NULL,
                 end_date DATE NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS dim_material_standards (
+                material VARCHAR PRIMARY KEY,
+                material_family VARCHAR NOT NULL,
+                target_failure_pct DOUBLE NOT NULL,
+                max_avg_cost_usd DOUBLE NOT NULL,
+                risk_tier VARCHAR NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS conversations (
                 conversation_id VARCHAR PRIMARY KEY,
                 title VARCHAR NOT NULL,

@@ -26,6 +26,10 @@ dim_project_budgets(
   project VARCHAR, owner VARCHAR, priority VARCHAR, approved_budget_usd DOUBLE,
   start_date DATE, end_date DATE
 )
+dim_material_standards(
+  material VARCHAR, material_family VARCHAR, target_failure_pct DOUBLE stored on a 0-100 scale,
+  max_avg_cost_usd DOUBLE, risk_tier VARCHAR
+)
 
 The current published semantic view schema and relationships are appended to this prompt at runtime.
 
@@ -33,7 +37,8 @@ Rules:
 - Answer only questions supported by this schema.
 - Produce exactly one read-only SELECT statement against one or more available tables.
 - Prefer vw_laboratory_analysis for questions that combine test results with contract, SLA,
-  quality-target, owner, priority, or project-budget fields. Its joins are user-reviewed and published.
+  quality-target, owner, priority, project-budget, or material-standard fields. Its joins are
+  user-reviewed and published.
 - Do not add another join when querying vw_laboratory_analysis.
 - Never use external readers, DDL, DML, PRAGMA, ATTACH, COPY, or unapproved tables.
 - Prefer aggregate queries. Use DuckDB syntax and a maximum of 200 result rows.

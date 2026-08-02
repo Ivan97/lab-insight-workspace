@@ -1,0 +1,6 @@
+material,material_family,target_failure_pct,max_avg_cost_usd,risk_tier
+Alloy-X,Metals,8.0,105.0,Low
+Polymer-A,Polymers,12.0,100.0,High
+Ceramic-C,Ceramics,9.0,110.0,Medium
+Composite-Z,Composites,10.0,115.0,Medium
+Copper-M,Metals,7.0,108.0,Low

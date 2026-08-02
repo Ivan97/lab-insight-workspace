@@ -7,6 +7,7 @@ ALLOWED_TABLES = {
     "fact_test_results",
     "dim_vendor_contracts",
     "dim_project_budgets",
+    "dim_material_standards",
     "vw_laboratory_analysis",
 }
 DISALLOWED_TOKENS = re.compile(

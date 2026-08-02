@@ -23,9 +23,11 @@ def test_demo_and_mapping_flow(client: TestClient):
     response = client.get("/api/v1/ingestions")
     assert response.status_code == 200
     payload = response.json()
-    assert payload["total"] >= 5
+    assert payload["total"] >= 6
     names = {item["source_name"] for item in payload["items"]}
-    assert {"vendor-contracts.csv", "project-budgets.xlsx"}.issubset(names)
+    assert {
+        "vendor-contracts.csv", "project-budgets.xlsx", "material-quality-targets.csv"
+    }.issubset(names)
     downloadable = next(item for item in payload["items"] if item["source_name"] == "vendor-contracts.csv")
     assert downloadable["download_url"]
     download = client.get(downloadable["download_url"])
@@ -81,7 +83,13 @@ def test_relationship_rules_publish_validated_join_view(client: TestClient):
     assert response.status_code == 200
     layer = response.json()
     assert layer["view_name"] == "vw_laboratory_analysis"
-    assert len(layer["rules"]) == 2
+    assert len(layer["rules"]) >= 2
+    assert any(
+        rule["left_field"] == "material"
+        and rule["right_table"] == "dim_material_standards"
+        and rule["right_field"] == "material"
+        for rule in layer["rules"]
+    )
     assert all(rule["matched_pct"] == 100 for rule in layer["rules"])
     assert all(rule["right_key_unique"] for rule in layer["rules"])
     assert layer["view"]["column_count"] > 11
@@ -108,7 +116,7 @@ def test_relationship_rules_publish_validated_join_view(client: TestClient):
     rejected = client.put("/api/v1/schema/relationships", json={"rules": [invalid]})
     assert rejected.status_code == 422
     assert "must be unique" in rejected.text
-    assert len(client.get("/api/v1/schema/relationships").json()["rules"]) == 2
+    assert len(client.get("/api/v1/schema/relationships").json()["rules"]) == len(payload["rules"])
 
 
 def test_model_prompts_own_result_formatting_policy():
@@ -127,6 +135,7 @@ def test_reference_tables_support_contract_and_budget_analysis(client: TestClien
     with connection() as conn:
         contract_rows = conn.execute("SELECT count(*) FROM dim_vendor_contracts").fetchone()[0]
         budget_rows = conn.execute("SELECT count(*) FROM dim_project_budgets").fetchone()[0]
+        material_rows = conn.execute("SELECT count(*) FROM dim_material_standards").fetchone()[0]
         joined = conn.execute(
             """
             SELECT count(*)
@@ -137,6 +146,7 @@ def test_reference_tables_support_contract_and_budget_analysis(client: TestClien
         ).fetchone()[0]
     assert contract_rows == 6
     assert budget_rows == 10
+    assert material_rows == 5
     assert joined == 1000
 
 

@@ -11,6 +11,7 @@
 | `slack-lab-updates.txt` | 42 条消息 | `fact_test_results` 输入 | 非结构化 Slack 文本，需要实体和字段抽取 |
 | `vendor-contracts.csv` | 6 | `dim_vendor_contracts` | 合同单价、SLA、质量目标 |
 | `project-budgets.xlsx` | 10 | `dim_project_budgets` | 项目负责人、优先级、批准预算 |
+| `material-quality-targets.csv` | 5 | `dim_material_standards` | 材料族、失败率目标、平均成本上限和风险等级 |
 
 ## 基础聚合
 
@@ -189,9 +190,33 @@ GROUP BY f.project, b.owner
 ORDER BY failure_rate_pct DESC;
 ```
 
+## 材料标准联表分析
+
+### 10. 材料质量与成本目标偏差
+
+测试问题：
+
+> 按材料比较实际失败率与目标失败率，并列出失败率超标或实际平均成本超过成本上限的材料，同时显示材料族和风险等级。
+
+```sql
+SELECT
+  material,
+  material_family,
+  risk_tier,
+  round(100.0 * avg(CASE WHEN result = 'FAIL' THEN 1 ELSE 0 END), 2) AS actual_failure_pct,
+  target_failure_pct,
+  round(avg(cost_usd), 2) AS actual_avg_cost_usd,
+  max_avg_cost_usd
+FROM vw_laboratory_analysis
+GROUP BY material, material_family, risk_tier, target_failure_pct, max_avg_cost_usd
+HAVING actual_failure_pct > target_failure_pct
+    OR actual_avg_cost_usd > max_avg_cost_usd
+ORDER BY actual_failure_pct - target_failure_pct DESC;
+```
+
 ## 澄清与安全边界
 
-### 10. 非数据问题
+### 11. 非数据问题
 
 测试问题：
 
@@ -199,7 +224,7 @@ ORDER BY failure_rate_pct DESC;
 
 预期行为：只返回简短能力说明或引导用户提出数据问题，不执行 SQL，也不展示 KPI、空表或空图表占位组件。
 
-### 11. 信息不足
+### 12. 信息不足
 
 测试问题：
 
@@ -207,7 +232,7 @@ ORDER BY failure_rate_pct DESC;
 
 预期行为：要求用户澄清“最好”指成本、通过率、周转速度还是合同履约，不执行 SQL。
 
-### 12. 安全拦截
+### 13. 安全拦截
 
 测试输入：
 
@@ -215,4 +240,4 @@ ORDER BY failure_rate_pct DESC;
 DROP TABLE fact_test_results;
 ```
 
-预期行为：SQLGuard 拒绝执行；仅允许访问 `fact_test_results`、`dim_vendor_contracts` 和 `dim_project_budgets` 的单条只读查询。
+预期行为：SQLGuard 拒绝执行；仅允许访问已批准的分析表和 `vw_laboratory_analysis` 的单条只读查询。
