@@ -2,7 +2,7 @@
 
 > 文档状态：最终方案（实施前评审版）  
 > 目标：在 4 小时内交付一个可运行、可演示、能解决真实问题的纵向 MVP  
-> 技术栈：React、TypeScript、Vite、FastAPI、DuckDB、Polars、SQLGlot、Apache ECharts、OpenAI-compatible LLM API
+> 技术栈：React、TypeScript、Vite、FastAPI、DuckDB、Polars、SQLGlot、AntV MCP Server Chart、OpenAI-compatible LLM API
 
 ## 1. 执行摘要
 
@@ -78,7 +78,7 @@ MVP 成功不以支持最多文件类型或最多 Agent 为标准，而以一条
 - DuckDB 本地持久化；
 - 基于受控语义上下文的 Text-to-SQL；
 - SQL 只读校验、执行限制和有限修复；
-- KPI、表格、Apache ECharts 图表和洞察总结；
+- KPI、表格、Visualization Agent 自主生成的图表和洞察总结；
 - 可重复执行的 Demo 数据与演示脚本。
 
 ### 3.2 有余量再交付（P1）
@@ -203,7 +203,7 @@ AI 只提供建议，用户确认后才写入 Canonical 层。Demo 中至少要�
 - `UploadDropzone`、`SourceList`；
 - `ProfileSummary`、`MappingTable`、`DataPreview`；
 - `QuestionComposer`、`SuggestedQuestion`；
-- `KpiCard`、`InsightCard`、`ChartPanel`、`ResultTable`；
+- `KpiCard`、`InsightCard`、`VisualizationPanel`、`ResultTable`；
 - `SqlDisclosure`、`MetricDisclosure`、`WarningBanner`；
 - `Skeleton`、`EmptyState`、`ErrorState` 和 `Toast`。
 
@@ -232,7 +232,7 @@ flowchart LR
 2. **保留人工确认**：AI 映射存在概率性，关键数据不能无审核进入分析层。
 3. **分析使用统一视图**：底层可以规范化建模，但向模型提供字段含义清晰的宽视图，降低 Join 错误率。
 4. **SQL 与洞察分阶段生成**：SQL 负责获得事实，洞察模型只能基于执行结果总结，避免模型凭空生成数字。
-5. **图表由受控配置驱动**：模型不能生成并执行任意 Python 绘图代码。
+5. **图表类型由 Agent 自主选择**：系统把用户问题、指标语义和查询结果交给 Visualization Agent，由 Agent 从 AntV MCP Server Chart 暴露的工具中选择最合适的可视化，不维护固定的“数据形态 → 图表类型”规则。
 
 ## 6. Demo 数据方案
 
@@ -634,7 +634,8 @@ flowchart TB
         A2[Schema Mapping & Normalization]
         A3[Semantic Context Builder]
         A4[Text-to-SQL Workflow]
-        A5[Chart & Insight Service]
+        A5[Visualization Agent & MCP Client]
+        A6[Insight Service]
     end
 
     subgraph SAFETY[Validation & Governance]
@@ -655,11 +656,18 @@ flowchart TB
         M3[Gemini - Future]
     end
 
+    subgraph VIS[Visualization Runtime]
+        V1[AntV MCP Server Chart]
+        V2[Chart Render Service]
+        V3[Local Artifact Cache]
+    end
+
     UI --> API
     API --> APP
     APP --> SAFETY
     APP --> DATA
     APP --> MODEL
+    A5 --> VIS
 ```
 
 ### 10.1 技术选型
@@ -673,7 +681,9 @@ flowchart TB
 | 数据库 | DuckDB | 适合文件接入、聚合和本地 OLAP；零服务部署；比 SQLite 更贴合分析场景 |
 | 数据处理 | Polars | 用于读取、Profiling、清洗和批量转换；性能好且表达清晰 |
 | SQL 解析 | SQLGlot | 做 AST 校验、表和函数白名单、SQL 规范化及有限方言处理 |
-| 图表 | Apache ECharts | 前端原生交互强，样式控制细，适合统一的数据集与白名单图表配置 |
+| 可视化 | Visualization Agent + `@antv/mcp-server-chart` | Agent 根据问题、语义和结果自主选择 MCP 工具；不在应用中硬编码数据类型与图表类型的映射 |
+| MCP Transport | 本地 Streamable HTTP | MCP Server 独立运行在本机，FastAPI 作为 MCP Client；比每次启动 stdio 子进程更易做健康检查和超时控制 |
+| 图表展示 | 同源图片资产 + 原始结果表 | 后端把 MCP 返回的图表下载到临时缓存并通过本产品域名提供；前端不直接信任或长期依赖第三方 URL |
 | 前端数据访问 | 生成的 TypeScript API Client | 直接来自 OpenAPI，避免前后端各维护一套字段名称和枚举 |
 | 前端 Mock | Mock Service Worker | 后端未完成时按同一契约返回固定数据，支持真正并行开发 |
 | 模型调用 | 自定义轻量 `ModelClient` | Demo 接入 DeepSeek/Kimi 的 OpenAI-compatible API，未来通过适配器接入 Gemini |
@@ -749,6 +759,7 @@ MVP 只有一个分析视图、少量维度和指标，完整语义上下文可�
 | `GET` | `/api/v1/metrics` | 无 | `MetricCatalogResponse` | 显示指标口径 |
 | `POST` | `/api/v1/queries` | `QueryRequest` | `QueryResponse` | 自然语言分析 |
 | `GET` | `/api/v1/queries/suggestions` | 无 | `QuerySuggestionResponse` | 获取固定示例问题 |
+| `GET` | `/api/v1/assets/{asset_id}` | Path ID | 图片文件 | 同源读取已缓存的 MCP 图表资产 |
 
 P0 不实现删除数据接口，避免 Demo 误操作。查询接口在 MVP 中同步返回，前端设置 60 秒超时并展示“理解问题、生成查询、分析结果”的阶段状态；流式响应和 SSE 属于 P1。
 
@@ -774,7 +785,7 @@ P0 不实现删除数据接口，避免 Demo 误操作。查询接口在 MVP 中
 
 | 模型 | 字段 |
 |---|---|
-| `HealthResponse` | `status`、`version`、`database.status`、`model.provider`、`model.configured`、`request_id` |
+| `HealthResponse` | `status`、`version`、`database.status`、`model.provider`、`model.configured`、`visualization_mcp.status`、`request_id` |
 | `DemoInitializeRequest` | `seed`，默认使用项目固定种子；重复调用不得重复插入数据 |
 | `DemoInitializeResponse` | `initialized`、`batch_ids`、`record_count`、`request_id` |
 | `TextIngestionRequest` | `source_name`、`content`、`vendor_hint?`；`content` 长度 1–50,000 |
@@ -861,13 +872,14 @@ P0 不实现删除数据接口，避免 Demo 误操作。查询接口在 MVP 中
       "comparison": null
     }
   ],
-  "chart": {
-    "type": "BAR",
+  "visualization": {
+    "status": "READY",
+    "tool_name": "generate_dual_axes_chart",
     "title": "Cost and turnaround time by vendor",
-    "x_field": "lab_vendor",
-    "y_fields": ["avg_cost_usd", "avg_turnaround_days"],
-    "series_field": null,
-    "data": []
+    "artifact_type": "IMAGE",
+    "asset_url": "/api/v1/assets/uuid",
+    "alt_text": "Dual-axis chart comparing average cost and turnaround time for each vendor.",
+    "rationale": "The two metrics have different units and should be compared without sharing one scale."
   },
   "table": {
     "columns": [],
@@ -892,7 +904,7 @@ P0 不实现删除数据接口，避免 Demo 误操作。查询接口在 MVP 中
 }
 ```
 
-`ChartSpec.type` 仅允许 `NONE`、`BAR`、`LINE`、`SCATTER`、`DONUT`。后端返回数据和受控图表语义，前端负责将其转换为 ECharts Option；响应中不允许出现可执行 JavaScript。
+`VisualizationArtifact.status` 允许 `READY`、`SKIPPED` 和 `FAILED`。`tool_name` 记录 Agent 实际选择的 MCP 工具；`asset_url` 只能是本产品同源的 `/api/v1/assets/{asset_id}`，不能把第三方 URL 直接透传给浏览器。`alt_text` 用于无障碍和图表加载失败时的解释，`rationale` 说明 Agent 为什么选择该可视化，但不作为业务事实。
 
 #### ErrorResponse
 
@@ -908,7 +920,7 @@ P0 不实现删除数据接口，避免 Demo 误操作。查询接口在 MVP 中
 }
 ```
 
-常用错误码包括 `UNSUPPORTED_FILE_TYPE`、`INGESTION_FAILED`、`MAPPING_NOT_READY`、`MAPPING_VALIDATION_FAILED`、`QUERY_OUT_OF_SCOPE`、`SQL_REJECTED`、`QUERY_TIMEOUT`、`MODEL_UNAVAILABLE` 和 `INTERNAL_ERROR`。
+常用错误码包括 `UNSUPPORTED_FILE_TYPE`、`INGESTION_FAILED`、`MAPPING_NOT_READY`、`MAPPING_VALIDATION_FAILED`、`QUERY_OUT_OF_SCOPE`、`SQL_REJECTED`、`QUERY_TIMEOUT`、`MODEL_UNAVAILABLE`、`MCP_UNAVAILABLE`、`MCP_TIMEOUT`、`ASSET_FETCH_REJECTED` 和 `INTERNAL_ERROR`。
 
 ### 10.10 前端并行开发约定
 
@@ -918,13 +930,13 @@ P0 不实现删除数据接口，避免 Demo 误操作。查询接口在 MVP 中
 4. 后端使用相同 Golden JSON 做响应模型测试；
 5. 联调时关闭 Mock，将 `VITE_API_BASE_URL` 指向 FastAPI；
 6. CI 或本地检查必须验证 OpenAPI 能生成客户端、Pydantic 响应符合契约；
-7. 前端不得依赖数据库列名，后端不得返回 ECharts 私有配置对象。
+7. 前端不得依赖数据库列名，也不得直接调用 MCP；所有 MCP 工具调用、外部 URL 处理和图表缓存均由后端负责。
 
 必须预先准备以下 Mock 场景：
 
 - Sources 列表包含 Ready、Needs Review 和 Failed；
 - Mapping 页面包含高置信度、低置信度、忽略字段和转换警告；
-- Analyze 页面包含 KPI、柱状图、洞察、SQL 和数据质量警告；
+- Analyze 页面包含 KPI、MCP 图表资产、洞察、SQL 和数据质量警告；
 - 查询无结果；
 - 模型暂时不可用。
 
@@ -935,15 +947,17 @@ P0 不实现删除数据接口，避免 Demo 误操作。查询接口在 MVP 中
 1. 接收用户问题和当前会话筛选条件；
 2. 判断问题是否属于当前数据范围；
 3. 组装 Schema、指标定义、枚举值、时间范围和精选 SQL 示例；
-4. 要求模型以结构化格式返回 SQL、使用指标、假设和图表建议；
+4. 要求模型以结构化格式返回 SQL、使用指标和假设；
 5. 使用 SQLGlot 解析 SQL AST；
 6. 执行安全校验；
 7. 对合法 SQL 运行 `EXPLAIN`；
 8. 执行查询并限制行数与时间；
 9. 若为可修复的语法或字段错误，将数据库错误反馈给模型，最多修复两次；
 10. 对结果做空结果、类型、聚合粒度和异常范围检查；
-11. 选择图表并渲染；
-12. 将问题、指标口径和查询结果交给模型生成总结，不允许其引用结果中不存在的数字。
+11. 将用户问题、指标语义和经过裁剪的查询结果交给 Visualization Agent；
+12. Visualization Agent 从 MCP Server 动态发现的工具中自主选择并调用一个合适的可视化工具，也可以判断当前结果不需要图表；
+13. 后端校验 MCP 返回值、缓存图表资产并生成同源 `asset_url`；
+14. 将问题、指标口径和查询结果交给模型生成总结，不允许其引用结果中不存在的数字。
 
 ### 11.2 SQL 安全边界
 
@@ -970,22 +984,70 @@ SQLGlot 是解析工具，不是完整安全沙箱。应用层还必须执行以
 
 ## 12. 图表与洞察策略
 
-### 12.1 图表选择
+### 12.1 Visualization Agent 的职责
 
-图表由查询结果的数据类型和形状决定：
+系统不维护任何“时间序列用折线图、分类比较用柱状图”之类的固定路由规则。Visualization Agent 根据以下上下文自主决定是否需要图表、选择哪个 MCP Tool、如何组织 Tool Arguments：
 
-| 结果形态 | 默认展示 |
-|---|---|
-| 单一聚合值 | KPI 卡片 |
-| 时间 + 指标 | 折线图 |
-| 类别 + 指标 | 排序柱状图 |
-| 两个数值指标 | 散点图 |
-| 状态或结果占比 | 环形图或柱状图 |
-| 多维明细 | 可筛选表格 |
+- 用户原始问题和显式筛选条件；
+- 本次查询使用的指标定义和单位；
+- SQL 结果的列名、类型、行数和实际数据；
+- 当前回答想强调的比较、趋势、分布、关系或异常；
+- MCP Server 通过 `tools/list` 动态返回的工具名称、说明和 JSON Schema。
 
-模型只能输出白名单内的图表配置，如图表类型、X/Y 字段、颜色分组和标题，不能生成并执行 Python 代码。
+MCP Server Chart 负责“接受指定工具及参数并生成可视化”，Visualization Agent 负责“理解分析意图并选择工具”。应用不能用 `if/else` 或静态表替代 Agent 的选择。
 
-### 12.2 洞察输出结构
+Agent 每次最多调用一个主可视化工具，避免为了展示能力生成多个重复图表。Agent 可以返回 `SKIPPED`，例如结果为空、数据不足或图表不会增加信息价值；原始结果表始终保留。
+
+### 12.2 MCP 调用链路
+
+1. FastAPI 启动时连接本地 `mcp-server-chart --transport streamable`；
+2. MCP Client 调用 `tools/list` 获取当前可用工具并缓存工具 Schema；
+3. Query 执行和 Result QA 完成后，后端裁剪并脱敏结果；
+4. ModelClient 将问题、语义和结果与 MCP Tool Schemas 一起交给 Visualization Agent；
+5. Agent 产生一次 Tool Call，MCP Client 负责调用对应工具；
+6. 后端校验 MCP 响应中的成功状态和资源 URL；
+7. 后端下载图表到 `data/artifacts/`，生成内容哈希和 `asset_id`；
+8. 前端通过 `/api/v1/assets/{asset_id}` 同源展示图片，并显示 Agent 的选择理由和无障碍文本。
+
+MCP 调用设置独立超时；超时或渲染失败不影响 SQL、KPI、表格和洞察返回。`VisualizationArtifact.status` 标记为 `FAILED`，前端显示温和提示而不是让整个查询失败。
+
+### 12.3 可用工具与自主选择边界
+
+MVP 不指定某类数据必须使用某种 Chart。Agent 可以在 MCP Server 提供的面积图、柱状图、箱线图、双轴图、直方图、折线图、饼图、雷达图、桑基图、散点图、树图、小提琴图、词云和 Spreadsheet 等工具中自主判断。
+
+工具边界只用于运行环境和数据安全，不用于替 Agent 决定图表：
+
+- 地理工具依赖 AMap 且当前只支持中国地图，MVP 默认通过 `DISABLED_TOOLS` 关闭；
+- 流程图、鱼骨图、思维导图和组织架构图不属于本产品的查询结果可视化，MVP 默认关闭；
+- 生产环境可以基于合规和产品范围调整工具集合；
+- Agent 只能调用 MCP 暴露的工具，不能生成并执行 JavaScript、Python 或 HTML。
+
+### 12.4 Apple 风格图表一致性
+
+图表类型由 Agent 决定，视觉样式由产品统一控制。对 Tool Schema 支持的公共样式参数，后端在调用前注入默认值：
+
+- 浅色 Theme；
+- 白色背景；
+- 主色以 `#007AFF` 为核心；
+- 辅助 Palette 使用 `#34C759`、`#FF9F0A`、`#AF52DE`、`#5AC8FA`；
+- 默认尺寸约 1,200 × 640；
+- 标题简短，轴标题包含单位；
+- 不使用 3D、过度纹理或高饱和渐变。
+
+Agent 可以决定 Chart Tool 和数据编码，但不能覆盖可访问性、安全或品牌样式约束。前端将图表放在白色 `VisualizationPanel` 中，保留足够留白，并提供下载、重试和查看数据入口。
+
+### 12.5 数据安全与部署边界
+
+AntV MCP Server Chart 默认可以调用公共图表生成服务。这仅适用于本项目的合成 Demo 数据。真实企业数据必须：
+
+- 使用 `VIS_REQUEST_SERVER` 指向私有部署的 GPT-Vis-SSR 或经企业批准的渲染服务；
+- 只发送 SQL 聚合结果，不发送 Raw 文件、Slack 原文、Prompt、用户身份或数据血缘字段；
+- 最多发送 200 行、20 列，超出时先通过 SQL 或确定性聚合缩减；
+- 移除内部 ID、自由文本和可能识别个人或供应商联系人身份的字段；
+- 对 MCP 请求、工具名、耗时、成功状态和资产哈希做审计，但不在普通日志记录完整数据；
+- 限制 MCP 返回资源的协议、域名、文件大小和 MIME 类型，防止任意 URL 下载。
+
+### 12.6 洞察输出结构
 
 每次分析优先输出：
 
@@ -1005,9 +1067,10 @@ DeepSeek 和 Kimi 通过 OpenAI-compatible API 接入。模型调用层不直接
 
 - `generate_structured(...)`
 - `generate_text(...)`
+- `generate_tool_call(context, tool_schemas)`
 - 可选的 `extract_from_image(...)`
 
-Schema Mapping 和 Text-to-SQL 都要求结构化输出，并在应用侧做 Schema 校验和失败重试。
+Schema Mapping 和 Text-to-SQL 都要求结构化输出，并在应用侧做 Schema 校验和失败重试。Visualization Agent 使用 `generate_tool_call(...)` 从 MCP 动态工具 Schema 中选择工具；模型只产生 Tool Call，实际 MCP 连接、调用、超时和资源下载始终由后端执行。模型 Provider 原生 Tool Calling 格式的差异由 `ModelClient` 适配层屏蔽。
 
 ### 13.2 上线后迁移 Gemini
 
@@ -1083,7 +1146,8 @@ mini-hackathon/
 │   │   │   ├── normalization.py
 │   │   │   ├── semantic.py
 │   │   │   ├── text_to_sql.py
-│   │   │   ├── charts.py
+│   │   │   ├── visualization_agent.py
+│   │   │   ├── mcp_chart.py
 │   │   │   └── insights.py
 │   │   ├── db/
 │   │   │   ├── database.py
@@ -1098,7 +1162,8 @@ mini-hackathon/
 │       ├── test_api_contract.py
 │       ├── test_mapping.py
 │       ├── test_metrics.py
-│       └── test_sql_guard.py
+│       ├── test_sql_guard.py
+│       └── test_visualization_mcp.py
 ├── data/
 │   ├── demo/                 # 可重复生成的原始 Demo 数据
 │   └── app.duckdb            # 本地分析数据库
@@ -1106,6 +1171,8 @@ mini-hackathon/
 │   └── Mini Hackathon.md     # 产品与技术方案
 ├── scripts/
 │   └── generate_demo_data.py
+├── runtime/
+│   └── mcp-chart.json        # Transport、工具过滤和私有渲染配置
 └── Makefile                  # setup、dev、test、demo
 ```
 
@@ -1132,7 +1199,8 @@ mini-hackathon/
 - 固化 Canonical Schema、指标、Demo 故事和 API 枚举；
 - 创建 `openapi.yaml` 和三组 Golden JSON；
 - 前端生成 TypeScript Client，后端生成或编写 Pydantic Model；
-- 完成 Python、Node 和关键依赖冒烟测试；
+- 完成 Python、Node、AntV MCP Server Chart 和关键依赖冒烟测试；
+- 验证 MCP `tools/list`、一次工具调用和图表资产下载；
 - 确认 Apple 风格 Token 和页面路由。
 
 **退出条件：** 前端可以用 Mock 打开三个页面，后端 Swagger 能显示全部 P0 接口，双方不再口头猜字段。
@@ -1144,7 +1212,7 @@ mini-hackathon/
 - 实现 App Shell、导航和全局设计 Token；
 - 完成 Sources 列表、上传和状态展示；
 - 完成 Mapping Table、数据预览和确认交互；
-- 完成 Analyze 页面、KPI、ECharts、结果表、SQL 展开和异常状态；
+- 完成 Analyze 页面、KPI、MCP 图表资产、结果表、SQL 展开和异常状态；
 - 使用 Mock 覆盖 Ready、Needs Review、Failed 和 Empty。
 
 #### Backend 轨道
@@ -1153,7 +1221,8 @@ mini-hackathon/
 - 实现 CSV/Excel/文本接入、Profiling 和状态机；
 - 实现结构化 Mapping、标准化、Preview 和 Commit；
 - 实现 Metric Catalog、Text-to-SQL、SQLGlot Guard 和查询执行；
-- 实现 QueryResponse 组装与模型适配。
+- 启动 AntV MCP Server Chart 并实现 MCP Client、Visualization Agent、资产缓存和 QueryResponse 组装；
+- 实现模型适配以及 MCP 超时后的非阻断降级。
 
 #### Data/QA 轨道（如有人力）
 
@@ -1169,7 +1238,7 @@ mini-hackathon/
 - 前端关闭 Mock，连接 FastAPI；
 - 修复唯一允许优先处理的问题：契约不一致、主流程阻断、结果错误；
 - 验证上传、轮询、Review、Commit、Query 全链路；
-- 验证 ECharts 使用真实 QueryResponse；
+- 验证 Agent 能针对不同问题自主选择不同 MCP Tool，并通过真实 QueryResponse 展示图表资产；
 - 构建前端并由 FastAPI 托管静态文件。
 
 **退出条件：** 用户通过同一浏览器地址完成完整流程，Swagger 与前端实际使用的字段一致。
@@ -1179,7 +1248,7 @@ mini-hackathon/
 - 走通 4–6 分钟演示脚本；
 - 验证加载、空数据、错误和模型不可用状态；
 - 准备缓存降级数据，但明确标识是否为实时模型结果；
-- 检查响应式布局、文字溢出、图表配色和表格可读性；
+- 检查响应式布局、文字溢出、MCP 图表配色和表格可读性；
 - 清理密钥、日志中的敏感文本和临时配置；
 - 验证 `make demo` 可以从干净状态启动交付应用。
 
@@ -1194,9 +1263,9 @@ mini-hackathon/
 3. 推荐追问；
 4. 多轮对话记忆；
 5. 高级数据质量评分；
-6. 非核心图表类型。
+6. 图表下载功能和 Agent 选择理由展示。
 
-CSV/Excel、文本、映射确认、统一数据、Text-to-SQL、SQL Guard 和核心图表不可舍弃。
+CSV/Excel、文本、映射确认、统一数据、Text-to-SQL、SQL Guard 和 MCP Visualization Agent 主链路不可舍弃。
 
 ## 17. Demo 演示脚本
 
@@ -1207,7 +1276,7 @@ CSV/Excel、文本、映射确认、统一数据、Text-to-SQL、SQL Guard 和�
 3. **建立信任**：确认一个高置信度映射，修正一个低置信度字段，查看标准化预览。
 4. **处理文本**：粘贴一段 Slack 风格实验结果，提取为结构化记录。
 5. **跨源查询**：询问“各供应商的平均费用、通过率和交付周期如何？”
-6. **展示洞察**：图表指出 Vendor B 价格更低但交付更慢。
+6. **展示洞察**：说明 Visualization Agent 自主选择的 MCP Tool，并用生成图表指出 Vendor B 价格更低但交付更慢。
 7. **追问异常**：询问“最近两个月有哪些值得关注的异常？”
 8. **说明可信度**：展开 SQL、指标口径和来源信息。
 9. **未来愿景**：说明真实 Slack/邮件连接器、主动告警和 Gemini 企业部署。
@@ -1224,7 +1293,10 @@ CSV/Excel、文本、映射确认、统一数据、Text-to-SQL、SQL Guard 和�
 - [ ] 标准记录能追溯到原始批次或文本；
 - [ ] 至少 5 个核心自然语言问题可以生成合法 SQL；
 - [ ] 非只读 SQL 被拒绝；
-- [ ] 查询结果能生成合适的 KPI、图表和总结；
+- [ ] MCP Server 健康检查、`tools/list` 和工具调用成功；
+- [ ] Visualization Agent 根据问题和结果自主选择 MCP Tool，应用中不存在固定数据类型到图表类型映射；
+- [ ] 查询结果能生成合适的 KPI、MCP 图表资产和总结；
+- [ ] MCP 超时或失败时仍返回 KPI、表格和洞察；
 - [ ] 用户能查看 SQL、指标定义和筛选条件。
 
 ### 18.2 正确性验收
@@ -1252,7 +1324,9 @@ CSV/Excel、文本、映射确认、统一数据、Text-to-SQL、SQL Guard 和�
 | 文本数据缺乏上下文 | 字段无法可靠推断 | 展示低置信度并要求人工确认 |
 | 四小时范围过大 | 主流程未完成 | 严格按 P0/P1 和降级顺序执行 |
 | 前后端并行产生契约漂移 | 联调阶段集中失败 | OpenAPI-first、生成 Client、Golden JSON 和 Contract Test |
-| 图表选择不合适 | 演示效果差 | 使用确定性类型规则和白名单配置 |
+| Agent 选择的图表不合适 | 演示效果差 | 提供清晰的分析目标、指标语义、Tool Schema 和 Golden Case 评测，不用固定规则替代 Agent |
+| MCP 或公共渲染服务不可用 | 图表无法生成 | 独立超时、健康检查、同源资产缓存；失败时保留 KPI、表格和洞察 |
+| 企业数据发送到外部渲染服务 | 数据泄露 | Demo 只使用合成数据；真实数据强制配置私有 `VIS_REQUEST_SERVER` 并只发送脱敏聚合结果 |
 | SQL 看似可执行但口径错误 | 输出误导用户 | Metric Catalog、参考 SQL 和正确性测试 |
 | DuckDB 特有函数造成迁移成本 | 后续换引擎困难 | 语义层与执行层隔离，保留 SQLGlot 方言转换入口 |
 | API 限流或网络异常 | Demo 中断 | 提前缓存 Demo 映射与参考查询结果作为降级，不伪装为实时调用 |
@@ -1265,13 +1339,14 @@ Hackathon 结束时交付：
 2. 一套约 1,000 条记录、包含多种原始格式的确定性 Demo 数据；
 3. 一个 DuckDB 数据库，包含 Raw、Canonical 和 Analytics 数据；
 4. 一套可审阅的 Canonical Schema、字段映射和 Metric Catalog；
-5. 一个受控的 Text-to-SQL、图表和洞察流程；
+5. 一个受控的 Text-to-SQL、Visualization Agent、AntV MCP 图表和洞察流程；
 6. 一个 DeepSeek/Kimi 模型适配器，并为 Gemini 迁移保留接口；
 7. 一份 OpenAPI 契约、生成的 TypeScript Client 和可复用 Mock 数据；
-8. 一个 FastAPI 后端以及自动化的接口、指标、映射和 SQL Guard 测试；
-9. 本文档、启动说明和 4–6 分钟 Demo 脚本。
+8. 一个 FastAPI 后端以及自动化的接口、指标、映射、SQL Guard 和 MCP 集成测试；
+9. 一个本地 AntV MCP Server Chart Runtime、配置和图表资产缓存；
+10. 本文档、启动说明和 4–6 分钟 Demo 脚本。
 
-交付方式以单机可运行应用为主，不要求云部署。开发期运行 Vite 与 FastAPI 两个进程；交付时将 Vite 构建的静态产物交由 FastAPI 托管，用户只访问一个地址，DuckDB 和原始文件保存在本地。安装完成后通过 `make demo` 一条命令启动。
+交付方式以单机可运行应用为主，不要求云部署。开发期运行 Vite、FastAPI 和 AntV MCP Server；交付时将 Vite 构建的静态产物交由 FastAPI 托管，并由启动脚本同时管理 FastAPI 与本地 MCP 进程。用户只访问一个产品地址，DuckDB、原始文件和图表缓存保存在本地。安装完成后通过 `make demo` 一条命令启动。
 
 ## 21. 后续演进路线
 
@@ -1282,7 +1357,7 @@ Hackathon 结束时交付：
 - 本地多源接入；
 - 人工确认的 Schema Mapping；
 - DuckDB 统一分析；
-- Text-to-SQL、图表和洞察。
+- Text-to-SQL、Visualization Agent、AntV MCP 图表和洞察。
 
 ### Phase 2：团队内部试用
 
@@ -1319,12 +1394,14 @@ Hackathon 结束时交付：
 | 数据处理 | Polars |
 | SQL 防护 | SQLGlot + 应用层白名单和执行限制 |
 | 指标层 | 轻量 Metric Catalog |
+| 可视化 | Visualization Agent 自主选择 `@antv/mcp-server-chart` Tool，无固定图表路由规则 |
+| MCP 部署 | Demo 使用本地 Streamable MCP；真实数据使用私有 `VIS_REQUEST_SERVER` |
 | 工作流 | 显式 Python 流程，不使用 LangGraph |
 | 查询抽象 | MVP 不使用 Ibis |
 | 检索 | 小 Schema 直接注入上下文，不使用向量检索 |
 | Demo 模型 | DeepSeek / Kimi OpenAI-compatible API |
 | 生产模型 | 通过适配器迁移 Gemini |
-| 交付方式 | 前端构建产物由 FastAPI 托管，一个地址、一个命令启动 |
+| 交付方式 | 前端构建产物由 FastAPI 托管，启动脚本管理 FastAPI 与 MCP，一个地址、一个命令启动 |
 
 ## 23. 选型参考
 
@@ -1335,7 +1412,7 @@ Hackathon 结束时交付：
 - [Vite Getting Started and Production Build](https://vite.dev/guide/)
 - [FastAPI Features and OpenAPI](https://fastapi.tiangolo.com/features/)
 - [FastAPI Static Files](https://fastapi.tiangolo.com/tutorial/static-files/)
-- [Apache ECharts Dataset](https://echarts.apache.org/handbook/en/concepts/dataset/)
+- [AntV MCP Server Chart](https://github.com/antvis/mcp-server-chart)
 - [DuckDB Python API](https://duckdb.org/docs/stable/clients/python/overview)
 - [DuckDB CSV Import](https://duckdb.org/docs/stable/data/csv/overview)
 - [SQLGlot repository and AST documentation](https://github.com/tobymao/sqlglot)
