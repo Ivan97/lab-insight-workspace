@@ -452,12 +452,13 @@ Profiling 结果和字段词典共同作为 Schema Mapping 的模型上下文。
 | `ingestion_batches` | 一次文件或文本导入，记录来源和处理状态 |
 | `raw_records` | 一条未经修改的原始记录或文本片段 |
 | `field_mappings` | 某批次的字段映射、转换规则、置信度和确认状态 |
+| `join_rules` | 用户确认的表关系、关联键、Join 类型、基数、匹配率和发布状态 |
 | `dim_projects` | 项目、负责人、预算和时间范围 |
 | `dim_vendors` | 供应商标准名称、别名和默认币种 |
 | `dim_samples` | 样品、材料、产品类别和所属项目 |
 | `dim_tests` | 测试名称、测试方法、指标单位和 SLA |
 | `fact_test_results` | 一次测试尝试的费用、时间、测量值、状态和结果 |
-| `vw_test_results` | 面向 Text-to-SQL 的宽分析视图 |
+| `vw_laboratory_analysis` | 由已发布联表规则生成、面向 Text-to-SQL 的只读宽分析视图 |
 | `metric_catalog` | 指标名称、业务定义、SQL 表达式、允许维度和同义词 |
 | `conversations` | 一个用户分析会话 |
 | `messages` | 会话中的 User 或 Assistant 消息 |
@@ -743,6 +744,16 @@ erDiagram
 - 默认时间字段；
 - 默认过滤规则；
 - 空值和分母为零的处理方式；
+
+### 9.3 联表规则与视图发布
+
+- 联表规则只能引用已经发布到分析层的表和真实存在的字段，不接受用户提交任意 SQL；
+- MVP 以 `fact_test_results` 为事实表，支持连接供应商合同和项目预算维表；
+- 用户可配置左右关联键、`LEFT` / `INNER` Join，以及 `MANY_TO_ONE` / `ONE_TO_ONE` 基数；
+- 发布前计算事实行匹配率，并校验维表关联键唯一性；`ONE_TO_ONE` 还要求事实表关联键唯一；
+- 任一规则校验失败时整组规则回滚，保留上一个已发布版本；
+- 发布成功后原子重建 `vw_laboratory_analysis`，保留事实表粒度，避免维表重复键放大指标；
+- Text-to-SQL 涉及合同、SLA、质量目标、负责人或预算时，优先查询该审阅后的宽视图。
 - 表关联关系；
 - 示例问题和参考 SQL。
 
@@ -908,6 +919,8 @@ MVP 只有一个分析视图、少量维度和指标，完整语义上下文可�
 | `GET` | `/api/v1/ingestions/{batch_id}/preview` | `limit` | `CanonicalPreview` | 预览标准化数据和警告 |
 | `POST` | `/api/v1/ingestions/{batch_id}/commit` | `MappingCommitRequest` | `202 IngestionAccepted` | 确认并发布到分析层 |
 | `GET` | `/api/v1/schema/canonical` | 无 | `CanonicalSchemaResponse` | 前端显示标准字段词典 |
+| `GET` | `/api/v1/schema/relationships` | 无 | `SemanticLayerResponse` | 获取可用表、联表规则、校验结果和视图预览 |
+| `PUT` | `/api/v1/schema/relationships` | `JoinRuleSet` | `SemanticLayerResponse` | 校验并原子发布联表规则和分析视图 |
 | `GET` | `/api/v1/metrics` | 无 | `MetricCatalogResponse` | 显示指标口径 |
 | `POST` | `/api/v1/conversations` | `CreateConversationRequest` | `Conversation` | 创建分析会话 |
 | `GET` | `/api/v1/conversations/{conversation_id}` | Path ID | `Conversation` | 获取会话元数据 |
@@ -1199,7 +1212,7 @@ Surface Data Model 至少包含以下稳定路径：
 
 1. 接收用户问题和当前会话筛选条件；
 2. 判断问题是否属于当前数据范围；
-3. 组装 Schema、指标定义、枚举值、时间范围和精选 SQL 示例；
+3. 组装已发布分析视图 Schema、联表规则、指标定义、枚举值、时间范围和精选 SQL 示例；
 4. 要求模型以结构化格式返回 SQL、使用指标和假设；
 5. 使用 SQLGlot 解析 SQL AST；
 6. 执行安全校验；
@@ -1217,7 +1230,7 @@ Surface Data Model 至少包含以下稳定路径：
 SQLGlot 是解析工具，不是完整安全沙箱。应用层还必须执行以下限制：
 
 - 只允许单条 `SELECT` 或只读 `WITH`；
-- 只允许访问 `vw_test_results` 和批准的语义视图；
+- 只允许访问 `vw_laboratory_analysis` 和批准的底层分析表；
 - 禁止 DDL 和 DML；
 - 禁止 `ATTACH`、`DETACH`、`COPY`、`EXPORT`、`IMPORT`、`INSTALL` 和 `LOAD`；
 - 禁止 `read_csv`、`read_parquet` 等任意文件读取函数；

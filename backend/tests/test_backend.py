@@ -9,6 +9,7 @@ from backend.app.database import connection
 from backend.app.main import app
 from backend.app.model_client import ANSWER_SYSTEM_PROMPT, OpenAICompatibleModel
 from backend.app.sql_guard import SQLGuardError, guard_sql
+from backend.app.semantic import semantic_prompt_context
 from backend.app.text_to_sql import SYSTEM_PROMPT, GeneratedPlan, ModelConfigurationError
 
 
@@ -62,6 +63,11 @@ def test_sql_guard_accepts_analytics_and_rejects_unsafe_sql():
         "JOIN dim_vendor_contracts c USING (vendor)"
     )
     assert "dim_vendor_contracts" in joined
+    semantic_view = guard_sql(
+        "SELECT vendor, contract_tier, sum(cost_usd) FROM vw_laboratory_analysis "
+        "GROUP BY vendor, contract_tier"
+    )
+    assert "vw_laboratory_analysis" in semantic_view
     with pytest.raises(SQLGuardError):
         guard_sql("DROP TABLE fact_test_results")
     with pytest.raises(SQLGuardError):
@@ -70,12 +76,51 @@ def test_sql_guard_accepts_analytics_and_rejects_unsafe_sql():
         guard_sql("SELECT * FROM internal_users")
 
 
+def test_relationship_rules_publish_validated_join_view(client: TestClient):
+    response = client.get("/api/v1/schema/relationships")
+    assert response.status_code == 200
+    layer = response.json()
+    assert layer["view_name"] == "vw_laboratory_analysis"
+    assert len(layer["rules"]) == 2
+    assert all(rule["matched_pct"] == 100 for rule in layer["rules"])
+    assert all(rule["right_key_unique"] for rule in layer["rules"])
+    assert layer["view"]["column_count"] > 11
+    assert layer["view"]["preview"][0]["contract_tier"]
+    assert layer["view"]["preview"][0]["owner"]
+
+    payload = {
+        "rules": [
+            {
+                key: rule[key]
+                for key in (
+                    "name", "left_table", "left_field", "right_table", "right_field",
+                    "join_type", "relationship",
+                )
+            }
+            for rule in layer["rules"]
+        ]
+    }
+    published = client.put("/api/v1/schema/relationships", json=payload)
+    assert published.status_code == 200
+    assert published.json()["view"]["status"] == "PUBLISHED"
+
+    invalid = payload["rules"][0] | {"relationship": "ONE_TO_ONE"}
+    rejected = client.put("/api/v1/schema/relationships", json={"rules": [invalid]})
+    assert rejected.status_code == 422
+    assert "must be unique" in rejected.text
+    assert len(client.get("/api/v1/schema/relationships").json()["rules"]) == 2
+
+
 def test_model_prompts_own_result_formatting_policy():
     assert "strftime(date_expression, '%Y-%m-%d')" in SYSTEM_PROMPT
     assert "explicitly ROUND(..., 2)" in SYSTEM_PROMPT
     assert "Never return a 0-1 fraction" in SYSTEM_PROMPT
     assert "table.formats metadata" in ANSWER_SYSTEM_PROMPT
     assert "never multiply it by 100 again" in ANSWER_SYSTEM_PROMPT
+    context = semantic_prompt_context()
+    assert "Current published semantic layer" in context
+    assert "vw_laboratory_analysis" in context
+    assert "contract_tier" in context
 
 
 def test_reference_tables_support_contract_and_budget_analysis(client: TestClient):

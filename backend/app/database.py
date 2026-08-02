@@ -48,6 +48,22 @@ def init_schema() -> None:
                 profile JSON NOT NULL,
                 preview JSON NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS join_rules (
+                rule_id VARCHAR PRIMARY KEY,
+                name VARCHAR NOT NULL,
+                left_table VARCHAR NOT NULL,
+                left_field VARCHAR NOT NULL,
+                right_table VARCHAR NOT NULL,
+                right_field VARCHAR NOT NULL,
+                join_type VARCHAR NOT NULL,
+                relationship VARCHAR NOT NULL,
+                status VARCHAR NOT NULL,
+                view_name VARCHAR NOT NULL,
+                matched_pct DOUBLE NOT NULL,
+                right_key_unique BOOLEAN NOT NULL,
+                created_at TIMESTAMP NOT NULL,
+                updated_at TIMESTAMP NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS fact_test_results (
                 test_result_id VARCHAR PRIMARY KEY,
                 vendor VARCHAR NOT NULL,

@@ -3,7 +3,12 @@ import re
 from sqlglot import exp, parse
 from sqlglot.errors import ParseError
 
-ALLOWED_TABLES = {"fact_test_results", "dim_vendor_contracts", "dim_project_budgets"}
+ALLOWED_TABLES = {
+    "fact_test_results",
+    "dim_vendor_contracts",
+    "dim_project_budgets",
+    "vw_laboratory_analysis",
+}
 DISALLOWED_TOKENS = re.compile(
     r"\b(attach|copy|create|delete|detach|drop|export|import|insert|install|load|pragma|replace|truncate|update)\b",
     re.IGNORECASE,

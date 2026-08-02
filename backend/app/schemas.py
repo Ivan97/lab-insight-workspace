@@ -40,6 +40,20 @@ class MappingDraft(BaseModel):
     can_commit: bool = True
 
 
+class JoinRuleInput(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    left_table: str
+    left_field: str
+    right_table: str
+    right_field: str
+    join_type: Literal["LEFT", "INNER"] = "LEFT"
+    relationship: Literal["MANY_TO_ONE", "ONE_TO_ONE"] = "MANY_TO_ONE"
+
+
+class JoinRuleSet(BaseModel):
+    rules: list[JoinRuleInput] = Field(min_length=1, max_length=8)
+
+
 class TextIngestionRequest(BaseModel):
     source_name: str
     content: str = Field(min_length=1, max_length=50_000)

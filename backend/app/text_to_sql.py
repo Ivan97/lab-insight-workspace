@@ -7,6 +7,7 @@ from typing import ClassVar
 import httpx
 
 from .config import ROOT_DIR  # noqa: F401 - importing config loads local runtime settings.
+from .semantic import semantic_prompt_context
 
 SYSTEM_PROMPT = """You are the Text-to-SQL planner for an internal laboratory analytics product.
 Return one JSON object and no prose.
@@ -26,14 +27,14 @@ dim_project_budgets(
   start_date DATE, end_date DATE
 )
 
-Relationships:
-- fact_test_results.vendor = dim_vendor_contracts.vendor
-- fact_test_results.project = dim_project_budgets.project
+The current published semantic view schema and relationships are appended to this prompt at runtime.
 
 Rules:
 - Answer only questions supported by this schema.
 - Produce exactly one read-only SELECT statement against one or more available tables.
-- Use the relationships above for contract/SLA/quality-target and project-budget questions.
+- Prefer vw_laboratory_analysis for questions that combine test results with contract, SLA,
+  quality-target, owner, priority, or project-budget fields. Its joins are user-reviewed and published.
+- Do not add another join when querying vw_laboratory_analysis.
 - Never use external readers, DDL, DML, PRAGMA, ATTACH, COPY, or unapproved tables.
 - Prefer aggregate queries. Use DuckDB syntax and a maximum of 200 result rows.
 - SQL aliases must be simple snake_case names.
@@ -113,7 +114,7 @@ class TextToSQLPlanner:
             "stream": False,
             "temperature": 0,
             "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": f"{SYSTEM_PROMPT}\n\n{semantic_prompt_context()}"},
                 {"role": "user", "content": user_prompt},
             ],
         }

@@ -20,8 +20,15 @@ from .schemas import (
     Conversation,
     CreateMessageRequest,
     IngestionBatch,
+    JoinRuleSet,
     MappingDraft,
     TextIngestionRequest,
+)
+from .semantic import (
+    SemanticRuleError,
+    get_semantic_layer,
+    initialize_semantic_layer,
+    replace_semantic_rules,
 )
 
 
@@ -29,6 +36,7 @@ from .schemas import (
 async def lifespan(_: FastAPI):
     init_schema()
     initialize_demo()
+    initialize_semantic_layer()
     yield
 
 
@@ -254,6 +262,19 @@ def commit_ingestion(batch_id: str):
             [utcnow(), batch_id],
         )
     return get_ingestion(batch_id)
+
+
+@app.get("/api/v1/schema/relationships")
+def list_relationships():
+    return get_semantic_layer()
+
+
+@app.put("/api/v1/schema/relationships")
+def publish_relationships(request: JoinRuleSet):
+    try:
+        return replace_semantic_rules([rule.model_dump() for rule in request.rules])
+    except SemanticRuleError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 @app.post("/api/v1/conversations", response_model=Conversation, status_code=201)

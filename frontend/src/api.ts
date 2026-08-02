@@ -9,6 +9,9 @@ export interface MappingDraft { batch_id: string; version: number; mappings: Fie
 export interface ColumnProfile { name: string; inferred_type: string; null_rate: number; distinct_count: number; sample_values: unknown[]; warnings: string[] }
 export interface DataProfile { row_count: number; column_count: number; columns: ColumnProfile[]; warnings: string[] }
 export interface DataPreview { rows: Record<string, unknown>[]; row_count: number; limit: number }
+export interface JoinRuleInput { name: string; left_table: string; left_field: string; right_table: string; right_field: string; join_type: 'LEFT' | 'INNER'; relationship: 'MANY_TO_ONE' | 'ONE_TO_ONE' }
+export interface JoinRule extends JoinRuleInput { rule_id: string; status: string; view_name: string; matched_pct: number; right_key_unique: boolean; created_at: string; updated_at: string }
+export interface SemanticLayer { base_table: string; view_name: string; tables: { name: string; columns: string[] }[]; rules: JoinRule[]; view: { status: string; column_count: number; preview: Record<string, unknown>[] } }
 
 async function json<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${url}`, init)
@@ -21,6 +24,8 @@ export const api = {
   getMapping: (batchId: string) => json<MappingDraft>(`/ingestions/${batchId}/mapping`),
   getProfile: (batchId: string) => json<DataProfile>(`/ingestions/${batchId}/profile`),
   getPreview: (batchId: string) => json<DataPreview>(`/ingestions/${batchId}/preview`),
+  getRelationships: () => json<SemanticLayer>('/schema/relationships'),
+  publishRelationships: (rules: JoinRuleInput[]) => json<SemanticLayer>('/schema/relationships', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rules }) }),
   updateMapping: (batchId: string, draft: MappingDraft) => json<MappingDraft>(`/ingestions/${batchId}/mapping`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(draft) }),
   commitIngestion: (batchId: string) => json<Ingestion>(`/ingestions/${batchId}/commit`, { method: 'POST' }),
   createConversation: () => json<{ conversation_id: string }>('/conversations', { method: 'POST' }),

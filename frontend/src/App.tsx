@@ -9,15 +9,17 @@ import {
   Database,
   Download,
   FileSpreadsheet,
+  GitMerge,
   LayoutDashboard,
   Menu,
   Plus,
   Search,
   Sparkles,
+  Trash2,
   Upload,
 } from 'lucide-react'
 import { A2UIConversation } from './a2ui/A2UIConversation'
-import { api, type DataPreview, type DataProfile, type Ingestion, type MappingDraft } from './api'
+import { api, type DataPreview, type DataProfile, type Ingestion, type JoinRuleInput, type MappingDraft, type SemanticLayer } from './api'
 import './App.css'
 
 type Page = 'sources' | 'schema' | 'analyze'
@@ -215,6 +217,8 @@ function SchemaPage({ sources, batchId, onSelectBatch, onCommitted, onAnalyze }:
   const [profile, setProfile] = useState<DataProfile | null>(null)
   const [preview, setPreview] = useState<DataPreview | null>(null)
   const [reviewTab, setReviewTab] = useState<'profile' | 'preview'>('profile')
+  const [schemaMode, setSchemaMode] = useState<'fields' | 'relationships'>('fields')
+  const [semantic, setSemantic] = useState<SemanticLayer | null>(null)
   const source = sources.find((item) => item.batch_id === batchId) ?? sources[0]
   const sourceId = source?.batch_id
   useEffect(() => {
@@ -224,6 +228,7 @@ function SchemaPage({ sources, batchId, onSelectBatch, onCommitted, onAnalyze }:
       setMapping(nextMapping); setProfile(nextProfile); setPreview(nextPreview)
     })
   }, [sourceId])
+  useEffect(() => { void api.getRelationships().then(setSemantic) }, [])
 
   const updateTarget = (index: number, target: string) => setMapping((current) => current && ({ ...current, mappings: current.mappings.map((item, itemIndex) => itemIndex === index ? { ...item, target_field: target, status: 'MODIFIED' } : item) }))
   const commit = async () => {
@@ -238,6 +243,8 @@ function SchemaPage({ sources, batchId, onSelectBatch, onCommitted, onAnalyze }:
   const attentionCount = mapping.mappings.filter((item) => item.confidence < .8).length
   return <div className="page schema-page">
     <section className="page-heading"><span className="eyebrow">SCHEMA REVIEW</span><h1>Make the meaning explicit.</h1><p>Review AI suggestions before anything enters the trusted analysis layer.</p></section>
+    <div className="schema-mode-tabs" role="tablist"><button className={schemaMode === 'fields' ? 'active' : ''} onClick={() => setSchemaMode('fields')}><FileSpreadsheet size={15} /> Fields & mapping</button><button className={schemaMode === 'relationships' ? 'active' : ''} onClick={() => setSchemaMode('relationships')}><GitMerge size={15} /> Relationships</button></div>
+    {schemaMode === 'relationships' ? <RelationshipsPanel semantic={semantic} onPublished={setSemantic} /> : <>
     <section className="schema-source-switcher section-card" aria-label="Schema sources">
       <div className="schema-source-switcher-head"><div><strong>Source schemas</strong><span>{sources.length} connected files</span></div><small>Select a file to inspect its profile and field mapping.</small></div>
       <div className="schema-source-tabs" role="tablist">{sources.map((item) => <button role="tab" aria-selected={item.batch_id === source.batch_id} className={item.batch_id === source.batch_id ? 'active' : ''} key={item.batch_id} onClick={() => onSelectBatch(item.batch_id)}><span className={`mini-file-icon ${item.source_type.toLowerCase()}`}>{item.source_type === 'TEXT' ? 'TXT' : item.source_type}</span><span><strong>{item.source_name}</strong><small>{item.record_count.toLocaleString()} records</small></span></button>)}</div>
@@ -259,6 +266,63 @@ function SchemaPage({ sources, batchId, onSelectBatch, onCommitted, onAnalyze }:
         </div>)}
       </div>
       <div className="mapping-footer"><div><CheckCircle2 size={17} /><span>All required canonical fields are covered</span></div><button className="primary-button" onClick={() => void commit()}>Confirm & publish <ArrowRight size={16} /></button></div>
+    </section>
+    </>}
+  </div>
+}
+
+function RelationshipsPanel({ semantic, onPublished }: { semantic: SemanticLayer | null; onPublished: (semantic: SemanticLayer) => void }) {
+  const [rules, setRules] = useState<JoinRuleInput[]>([])
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  useEffect(() => {
+    if (semantic) setRules(semantic.rules.map(({ name, left_table, left_field, right_table, right_field, join_type, relationship }) => ({ name, left_table, left_field, right_table, right_field, join_type, relationship })))
+  }, [semantic])
+  if (!semantic) return <section className="section-card relationship-loading">Loading relationships…</section>
+  const table = (name: string) => semantic.tables.find((item) => item.name === name)
+  const dimensionTables = semantic.tables.filter((item) => item.name !== semantic.base_table)
+  const updateRule = (index: number, patch: Partial<JoinRuleInput>) => setRules((current) => current.map((rule, ruleIndex) => ruleIndex === index ? { ...rule, ...patch } : rule))
+  const addRule = () => {
+    const nextTable = dimensionTables.find((item) => !rules.some((rule) => rule.right_table === item.name)) ?? dimensionTables[0]
+    if (!nextTable) return
+    const leftColumns = table(semantic.base_table)?.columns ?? []
+    const shared = nextTable.columns.find((column) => leftColumns.includes(column)) ?? nextTable.columns[0]
+    setRules((current) => [...current, { name: `Join ${nextTable.name}`, left_table: semantic.base_table, left_field: shared, right_table: nextTable.name, right_field: shared, join_type: 'LEFT', relationship: 'MANY_TO_ONE' }])
+  }
+  const publish = async () => {
+    setSaving(true); setError('')
+    try { onPublished(await api.publishRelationships(rules)) } catch (reason) { setError(reason instanceof Error ? reason.message : 'Unable to publish relationships') } finally { setSaving(false) }
+  }
+  const previewColumns = Object.keys(semantic.view.preview[0] ?? {})
+  return <div className="relationships-workspace">
+    <section className="relationship-overview section-card">
+      <div><span className="relationship-icon"><GitMerge size={19} /></span><div><strong>Published analytical view</strong><code>{semantic.view_name}</code></div></div>
+      <div className="relationship-stats"><span><strong>{semantic.rules.length}</strong> relationships</span><span><strong>{semantic.view.column_count}</strong> fields</span><span className="status-badge ready"><CheckCircle2 size={13} /> Published</span></div>
+    </section>
+    <section className="section-card relationship-editor">
+      <div className="section-header"><div><h2>Join rules</h2><p>Define reviewed paths from the fact table to trusted dimensions. Keys are validated before publishing.</p></div><button className="secondary-button" onClick={addRule} disabled={rules.length >= dimensionTables.length}><Plus size={15} /> Add relationship</button></div>
+      <div className="relationship-list">
+        {rules.map((rule, index) => {
+          const published = semantic.rules.find((item) => item.right_table === rule.right_table && item.left_field === rule.left_field && item.right_field === rule.right_field)
+          const rightColumns = table(rule.right_table)?.columns ?? []
+          return <article className="relationship-rule" key={`${index}-${rule.right_table}`}>
+            <div className="relationship-rule-head"><input value={rule.name} aria-label="Relationship name" onChange={(event) => updateRule(index, { name: event.target.value })} /><div>{published && <><span className="match-chip">{published.matched_pct}% matched</span><span className={published.right_key_unique ? 'unique-chip' : 'warning-chip'}>{published.right_key_unique ? 'Unique key' : 'Duplicate key'}</span></>}<button className="icon-button remove-rule" onClick={() => setRules((current) => current.filter((_, ruleIndex) => ruleIndex !== index))} aria-label="Remove relationship"><Trash2 size={15} /></button></div></div>
+            <div className="join-builder">
+              <label><span>From table</span><select value={rule.left_table} disabled><option>{semantic.base_table}</option></select></label>
+              <label><span>Join key</span><select value={rule.left_field} onChange={(event) => updateRule(index, { left_field: event.target.value })}>{table(semantic.base_table)?.columns.map((column) => <option key={column}>{column}</option>)}</select></label>
+              <span className="join-arrow"><GitMerge size={18} /><small>{rule.join_type}</small></span>
+              <label><span>To table</span><select value={rule.right_table} onChange={(event) => { const nextTable = table(event.target.value); const shared = nextTable?.columns.find((column) => table(semantic.base_table)?.columns.includes(column)) ?? nextTable?.columns[0] ?? ''; updateRule(index, { right_table: event.target.value, right_field: shared }) }}>{dimensionTables.map((item) => <option key={item.name}>{item.name}</option>)}</select></label>
+              <label><span>Join key</span><select value={rule.right_field} onChange={(event) => updateRule(index, { right_field: event.target.value })}>{rightColumns.map((column) => <option key={column}>{column}</option>)}</select></label>
+            </div>
+            <div className="join-options"><label>Join type <select value={rule.join_type} onChange={(event) => updateRule(index, { join_type: event.target.value as JoinRuleInput['join_type'] })}><option value="LEFT">Keep all fact rows</option><option value="INNER">Only matched rows</option></select></label><label>Cardinality <select value={rule.relationship} onChange={(event) => updateRule(index, { relationship: event.target.value as JoinRuleInput['relationship'] })}><option value="MANY_TO_ONE">Many to one</option><option value="ONE_TO_ONE">One to one</option></select></label></div>
+          </article>
+        })}
+      </div>
+      <div className="mapping-footer"><div>{error ? <span className="relationship-error">{error}</span> : <><CheckCircle2 size={17} /><span>Publishing rebuilds the read-only view atomically</span></>}</div><button className="primary-button" disabled={saving || !rules.length} onClick={() => void publish()}>{saving ? 'Validating…' : 'Validate & publish'} <ArrowRight size={16} /></button></div>
+    </section>
+    <section className="section-card relationship-preview">
+      <div className="section-header"><div><h2>Joined view preview</h2><p>Sample rows from <code>{semantic.view_name}</code>. Text-to-SQL uses this view for cross-source questions.</p></div><span>{semantic.view.preview.length} rows</span></div>
+      <div className="preview-scroll"><table><thead><tr>{previewColumns.map((column) => <th key={column}>{column}</th>)}</tr></thead><tbody>{semantic.view.preview.map((row, index) => <tr key={index}>{previewColumns.map((column) => <td key={column}>{String(row[column] ?? '—')}</td>)}</tr>)}</tbody></table></div>
     </section>
   </div>
 }
