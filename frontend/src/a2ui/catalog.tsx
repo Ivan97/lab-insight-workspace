@@ -16,7 +16,7 @@ type ToolCall = { toolCallId: string; displayName: string; status: string; seque
 type ToolGroup = { groupId: string; calls: ToolCall[] }
 type Kpi = { key: string; label: string; value: number; format: string }
 type Visualization = { status: string; tool_name: string; title: string; rationale: string; asset_url?: string | null; error?: string; x_field: string; y_field: string; data: Record<string, string | number>[] }
-type Analysis = { answer: string; kpis: Kpi[]; table: { columns: string[]; rows: Record<string, string | number>[] }; insights: { kind: string; title: string; description: string }[]; sql: string; visualization: Visualization }
+type Analysis = { answer: string; requires_clarification?: boolean; kpis: Kpi[]; table: { columns: string[]; rows: Record<string, string | number>[] }; insights: { kind: string; title: string; description: string }[]; sql: string | null; visualization: Visualization }
 
 const ReasoningApi = { name: 'ReasoningPanel', schema: z.object({ segments: CommonSchemas.DynamicValue, status: CommonSchemas.DynamicValue }) }
 const ToolApi = { name: 'ToolCallGroup', schema: z.object({ groups: CommonSchemas.DynamicValue }) }
@@ -89,7 +89,7 @@ const RichMarkdown = createComponentImplementation(MarkdownApi, ({ props }) => {
 
 const AnalysisResult = createComponentImplementation(AnalysisApi, ({ props }) => {
   const analysis = props.analysis as unknown as Analysis | undefined
-  if (!analysis?.kpis) return null
+  if (!analysis?.kpis || analysis.requires_clarification || !analysis.table?.rows?.length) return null
   return <div className="analysis-result">
     <div className="kpi-grid">{analysis.kpis.map((kpi) => <div className="kpi-card" key={kpi.key}><span>{kpi.label}</span><strong>{formatKpi(kpi)}</strong></div>)}</div>
     <VisualizationPanel visualization={analysis.visualization} />

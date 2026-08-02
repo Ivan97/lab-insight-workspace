@@ -145,28 +145,33 @@ class A2UIStream:
         )
         markdown = ""
         body_chunk_count = 0
-        try:
-            async for chunk in OpenAICompatibleModel().stream_answer(self.question, analysis):
-                if self._is_cancelled():
-                    yield self._sse(self._update("/status", "CANCELLED"))
-                    return
-                body_chunk_count += 1
-                markdown += chunk
-                self.model["content"]["markdown"] = markdown
-                yield self._sse(self._update("/content/markdown", markdown))
-                if body_chunk_count == 2:
-                    yield self._sse(
-                        self._update_reasoning(
-                            "正文生成期间再次核对指标口径与图表证据。", "RUNNING"
+        if analysis["requires_clarification"]:
+            markdown = analysis["answer"]
+            self.model["content"]["markdown"] = markdown
+            yield self._sse(self._update("/content/markdown", markdown))
+        else:
+            try:
+                async for chunk in OpenAICompatibleModel().stream_answer(self.question, analysis):
+                    if self._is_cancelled():
+                        yield self._sse(self._update("/status", "CANCELLED"))
+                        return
+                    body_chunk_count += 1
+                    markdown += chunk
+                    self.model["content"]["markdown"] = markdown
+                    yield self._sse(self._update("/content/markdown", markdown))
+                    if body_chunk_count == 2:
+                        yield self._sse(
+                            self._update_reasoning(
+                                "正文生成期间再次核对指标口径与图表证据。", "RUNNING"
+                            )
                         )
-                    )
-                await asyncio.sleep(0.04)
-        except Exception as exc:  # noqa: BLE001 - expose failure instead of a fake fallback.
-            async for event in self._failure_events(
-                f"数据查询已完成，但真实模型回答失败（{type(exc).__name__}）。请检查模型服务后重试。"
-            ):
-                yield event
-            return
+                    await asyncio.sleep(0.04)
+            except Exception as exc:  # noqa: BLE001 - expose failure instead of a fake fallback.
+                async for event in self._failure_events(
+                    f"数据查询已完成，但真实模型回答失败（{type(exc).__name__}）。请检查模型服务后重试。"
+                ):
+                    yield event
+                return
 
         self.model["analysis"] = analysis
         yield self._sse(self._update("/analysis", analysis))
