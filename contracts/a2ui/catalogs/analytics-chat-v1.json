@@ -1,0 +1,132 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mini-hackathon.local/a2ui/catalogs/analytics-chat/v1",
+  "title": "Mini Hackathon Analytics Chat Catalog",
+  "description": "A2UI v0.9.1 catalog for streamed analytical assistant messages.",
+  "catalogId": "https://mini-hackathon.local/a2ui/catalogs/analytics-chat/v1",
+  "components": {
+    "Column": {"$ref": "#/$defs/Column"},
+    "ReasoningPanel": {"$ref": "#/$defs/ReasoningPanel"},
+    "ToolCallGroup": {"$ref": "#/$defs/ToolCallGroup"},
+    "RichMarkdown": {"$ref": "#/$defs/RichMarkdown"},
+    "AnalysisResult": {"$ref": "#/$defs/AnalysisResult"}
+  },
+  "theme": {
+    "type": "object",
+    "properties": {
+      "primaryColor": {"type": "string", "pattern": "^#[0-9A-Fa-f]{6}$"}
+    },
+    "additionalProperties": false
+  },
+  "$defs": {
+    "ComponentBase": {
+      "type": "object",
+      "properties": {"id": {"type": "string", "minLength": 1}},
+      "required": ["id"]
+    },
+    "DynamicValue": {
+      "anyOf": [
+        {"type": ["string", "number", "boolean", "array", "object", "null"]},
+        {
+          "type": "object",
+          "properties": {"path": {"type": "string", "pattern": "^/"}},
+          "required": ["path"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "Column": {
+      "allOf": [
+        {"$ref": "#/$defs/ComponentBase"},
+        {
+          "type": "object",
+          "properties": {
+            "component": {"const": "Column"},
+            "children": {
+              "$ref": "https://a2ui.org/specification/v0_9/common_types.json#/$defs/ChildList"
+            }
+          },
+          "required": ["component", "children"]
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "ReasoningPanel": {
+      "allOf": [
+        {"$ref": "#/$defs/ComponentBase"},
+        {
+          "type": "object",
+          "properties": {
+            "component": {"const": "ReasoningPanel"},
+            "segments": {"$ref": "#/$defs/DynamicValue"},
+            "status": {"$ref": "#/$defs/DynamicValue"}
+          },
+          "required": ["component", "segments", "status"]
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "ToolCallGroup": {
+      "allOf": [
+        {"$ref": "#/$defs/ComponentBase"},
+        {
+          "type": "object",
+          "properties": {
+            "component": {"const": "ToolCallGroup"},
+            "groups": {"$ref": "#/$defs/DynamicValue"}
+          },
+          "required": ["component", "groups"]
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "RichMarkdown": {
+      "allOf": [
+        {"$ref": "#/$defs/ComponentBase"},
+        {
+          "type": "object",
+          "properties": {
+            "component": {"const": "RichMarkdown"},
+            "markdown": {"$ref": "#/$defs/DynamicValue"}
+          },
+          "required": ["component", "markdown"]
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "AnalysisResult": {
+      "allOf": [
+        {"$ref": "#/$defs/ComponentBase"},
+        {
+          "type": "object",
+          "properties": {
+            "component": {"const": "AnalysisResult"},
+            "analysis": {"$ref": "#/$defs/DynamicValue"},
+            "artifacts": {"$ref": "#/$defs/DynamicValue"}
+          },
+          "required": ["component", "analysis", "artifacts"]
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "theme": {
+      "type": "object",
+      "properties": {
+        "primaryColor": {"type": "string", "pattern": "^#[0-9A-Fa-f]{6}$"}
+      },
+      "additionalProperties": true
+    },
+    "anyComponent": {
+      "oneOf": [
+        {"$ref": "#/components/Column"},
+        {"$ref": "#/components/ReasoningPanel"},
+        {"$ref": "#/components/ToolCallGroup"},
+        {"$ref": "#/components/RichMarkdown"},
+        {"$ref": "#/components/AnalysisResult"}
+      ],
+      "discriminator": {"propertyName": "component"}
+    },
+    "anyFunction": {"not": {}}
+  },
+  "functions": {}
+}

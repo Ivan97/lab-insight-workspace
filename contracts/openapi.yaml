@@ -1,0 +1,256 @@
+openapi: 3.1.0
+info:
+  title: Lab Insight Workspace API
+  version: 0.1.0
+  description: Versioned contract for ingestion, schema review, and A2UI-streamed analysis.
+  license:
+    name: Proprietary demo
+servers:
+  - url: /api/v1
+security: []
+paths:
+  /health:
+    get:
+      summary: Read service health
+      operationId: getHealth
+      responses:
+        "200":
+          description: Service health
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/HealthResponse"}
+  /demo/initialize:
+    post:
+      summary: Initialize deterministic demo data
+      operationId: initializeDemo
+      responses:
+        "200":
+          description: Demo data initialized
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/DemoInitializeResponse"}
+  /ingestions:
+    get:
+      summary: List ingestion batches
+      operationId: listIngestions
+      responses:
+        "200":
+          description: Ingestion batches
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, total]
+                properties:
+                  items: {type: array, items: {$ref: "#/components/schemas/IngestionBatch"}}
+                  total: {type: integer}
+  /ingestions/files:
+    post:
+      summary: Upload a structured data file
+      operationId: uploadFile
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: {type: string, format: binary}
+                vendor_hint: {type: [string, "null"]}
+      responses:
+        "202":
+          description: File accepted
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/IngestionBatch"}
+  /ingestions/text:
+    post:
+      summary: Submit unstructured source text
+      operationId: ingestText
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [source_name, content]
+              properties:
+                source_name: {type: string}
+                content: {type: string, minLength: 1, maxLength: 50000}
+                vendor_hint: {type: [string, "null"]}
+      responses:
+        "202":
+          description: Text accepted
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/IngestionBatch"}
+  /ingestions/{batch_id}:
+    get:
+      summary: Read an ingestion batch
+      operationId: getIngestion
+      parameters:
+        - {name: batch_id, in: path, required: true, schema: {type: string}}
+      responses:
+        "200":
+          description: Batch detail
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/IngestionBatch"}
+  /ingestions/{batch_id}/mapping:
+    get:
+      summary: Read a mapping draft
+      operationId: getMapping
+      parameters:
+        - {name: batch_id, in: path, required: true, schema: {type: string}}
+      responses:
+        "200":
+          description: Mapping draft
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/MappingDraft"}
+    put:
+      summary: Update a mapping draft
+      operationId: updateMapping
+      parameters:
+        - {name: batch_id, in: path, required: true, schema: {type: string}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/MappingDraft"}
+      responses:
+        "200":
+          description: Updated mapping
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/MappingDraft"}
+  /ingestions/{batch_id}/commit:
+    post:
+      summary: Publish an ingestion batch
+      operationId: commitIngestion
+      parameters:
+        - {name: batch_id, in: path, required: true, schema: {type: string}}
+      responses:
+        "200":
+          description: Published batch
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/IngestionBatch"}
+  /conversations:
+    post:
+      summary: Create an analysis conversation
+      operationId: createConversation
+      responses:
+        "201":
+          description: Conversation created
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Conversation"}
+  /conversations/{conversation_id}/messages/stream:
+    post:
+      summary: Stream an A2UI analysis response
+      operationId: streamMessage
+      parameters:
+        - {name: conversation_id, in: path, required: true, schema: {type: string}}
+        - {name: Idempotency-Key, in: header, required: true, schema: {type: string}}
+        - {name: Last-Event-ID, in: header, required: false, schema: {type: string}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/CreateMessageRequest"}
+      responses:
+        "200":
+          description: Ordered SSE events whose data fields are A2UI v0.9.1 envelopes
+          content:
+            text/event-stream:
+              schema: {type: string}
+  /analysis/suggestions:
+    get:
+      summary: List suggested analysis questions
+      operationId: getSuggestions
+      responses:
+        "200":
+          description: Suggested questions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: {type: array, items: {type: object}}
+components:
+  schemas:
+    HealthResponse:
+      type: object
+      required: [status, version, database, model, visualization_mcp]
+      properties:
+        status: {type: string, const: ok}
+        version: {type: string}
+        database: {type: object}
+        model: {type: object}
+        visualization_mcp: {type: object}
+    DemoInitializeResponse:
+      type: object
+      required: [initialized, record_count, batch_ids]
+      properties:
+        initialized: {type: boolean}
+        record_count: {type: integer}
+        batch_ids: {type: array, items: {type: string}}
+    IngestionBatch:
+      type: object
+      required: [batch_id, source_type, source_name, status, record_count, created_at, updated_at]
+      properties:
+        batch_id: {type: string}
+        source_type: {type: string, enum: [CSV, XLSX, TEXT]}
+        source_name: {type: string}
+        vendor_hint: {type: [string, "null"]}
+        status: {type: string, enum: [UPLOADED, PROFILING, MAPPING, NEEDS_REVIEW, COMMITTING, READY, FAILED]}
+        record_count: {type: integer}
+        quality_score: {type: number}
+        current_stage: {type: [string, "null"]}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    FieldMapping:
+      type: object
+      required: [source_field, target_field, confidence, transform, reason, status]
+      properties:
+        source_field: {type: string}
+        target_field: {type: [string, "null"]}
+        confidence: {type: number, minimum: 0, maximum: 1}
+        transform: {type: string}
+        reason: {type: string}
+        status: {type: string, enum: [SUGGESTED, CONFIRMED, MODIFIED, IGNORED]}
+        sample_before: {type: array}
+        sample_after: {type: array}
+        warnings: {type: array, items: {type: string}}
+    MappingDraft:
+      type: object
+      required: [batch_id, version, mappings, missing_required_fields, can_commit]
+      properties:
+        batch_id: {type: string}
+        version: {type: integer}
+        mappings: {type: array, items: {$ref: "#/components/schemas/FieldMapping"}}
+        missing_required_fields: {type: array, items: {type: string}}
+        can_commit: {type: boolean}
+    Conversation:
+      type: object
+      required: [conversation_id, title, created_at, updated_at]
+      properties:
+        conversation_id: {type: string}
+        title: {type: string}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    CreateMessageRequest:
+      type: object
+      required: [question, a2uiClientCapabilities]
+      properties:
+        question: {type: string, minLength: 1, maxLength: 1000}
+        filters: {type: object}
+        a2uiClientCapabilities:
+          type: object
+          required: [supportedCatalogIds]
+          properties:
+            supportedCatalogIds:
+              type: array
+              items: {type: string}
