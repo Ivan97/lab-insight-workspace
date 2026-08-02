@@ -38,6 +38,8 @@ def test_demo_and_mapping_flow(client: TestClient):
     preview = client.get(f"/api/v1/ingestions/{review_batch['batch_id']}/preview").json()
     assert profile["row_count"] == review_batch["record_count"]
     assert profile["columns"]
+    assert all("Example value" not in column["sample_values"] for column in profile["columns"])
+    assert any(column["inferred_type"] == "Decimal" for column in profile["columns"])
     assert preview["rows"]
     assert mapping["can_commit"] is True
     assert any(item["confidence"] < 0.8 for item in mapping["mappings"])

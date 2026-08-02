@@ -80,6 +80,20 @@
 .row-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
 .download-action { width: 28px; height: 28px; border: 1px solid var(--border); border-radius: 9px; display: grid; place-items: center; color: #5f6368; background: #fff; }
 .download-action:hover { color: #0877e6; border-color: #a9d2ff; background: #f6faff; }
+.schema-source-switcher { margin-bottom: 18px; overflow: hidden; }
+.schema-source-switcher-head { min-height: 62px; padding: 14px 20px; display: flex; align-items: center; justify-content: space-between; gap: 24px; border-bottom: 1px solid #ededf0; }
+.schema-source-switcher-head strong, .schema-source-switcher-head span { display: block; }
+.schema-source-switcher-head strong { font-size: 13px; }
+.schema-source-switcher-head span, .schema-source-switcher-head small { margin-top: 3px; color: #88888e; font-size: 10px; }
+.schema-source-tabs { padding: 8px; display: flex; gap: 6px; overflow-x: auto; scrollbar-width: thin; }
+.schema-source-tabs > button { min-width: 190px; max-width: 250px; height: 54px; padding: 7px 9px; display: flex; align-items: center; gap: 9px; text-align: left; border: 0; border-radius: 11px; color: #696970; background: transparent; cursor: pointer; }
+.schema-source-tabs > button:hover { background: #f4f4f7; }
+.schema-source-tabs > button.active { color: #1d1d1f; background: #edf5ff; box-shadow: inset 0 0 0 1px #d9eaff; }
+.schema-source-tabs > button > span:last-child { min-width: 0; }
+.schema-source-tabs strong, .schema-source-tabs small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.schema-source-tabs strong { font-size: 10px; }.schema-source-tabs small { margin-top: 3px; color: #8a8a90; font-size: 9px; }
+.mini-file-icon { flex: 0 0 auto; width: 31px; height: 31px; border-radius: 9px; display: grid!important; place-items: center; color: #167244; background: #e5f7ec; font-size: 8px!important; font-weight: 800; }
+.mini-file-icon.xlsx { color: #1768ad; background: #e9f3ff; }.mini-file-icon.text { color: #8051b8; background: #f3ebfc; }
 .review-summary { padding: 20px 24px; margin-bottom: 18px; display: flex; align-items: center; justify-content: space-between; }
 .review-progress { display: flex; gap: 8px; }.review-progress span { padding: 7px 10px; border-radius: 8px; font-size: 11px; color: #626269; background: #f3f3f6; }
 .data-review-card { margin-bottom: 18px; overflow: hidden; }.review-tabs { min-height: 54px; padding: 0 18px; display: flex; align-items: center; gap: 4px; border-bottom: 1px solid #ededf0; }.review-tabs button { border: 0; background: transparent; padding: 8px 11px; border-radius: 8px; color: #77777d; font-size: 12px; cursor: pointer; }.review-tabs button.active { color: #0a68c9; background: #eaf3ff; font-weight: 650; }.review-tabs > span { margin-left: auto; color: #8a8a90; font-size: 11px; }.profile-grid { padding: 16px; display: grid; grid-template-columns: repeat(auto-fit,minmax(220px,1fr)); gap: 10px; }.profile-grid article { position: relative; min-width: 0; border: 1px solid #e8e8ec; border-radius: 13px; padding: 13px; }.profile-grid article > div { display: flex; justify-content: space-between; gap: 8px; }.profile-grid code { color: #1661aa; overflow: hidden; text-overflow: ellipsis; }.profile-grid article > div span,.profile-grid small { color: #8a8a90; font-size: 9px; }.profile-grid strong { display: block; margin-top: 14px; font-size: 17px; }.profile-grid p { margin: 4px 0 0; color: #77777d; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.profile-grid em { display: inline-block; margin-top: 8px; color: #9b5e00; font-size: 9px; font-style: normal; }.preview-scroll { overflow: auto; max-height: 320px; }.preview-scroll table { width: 100%; border-collapse: collapse; font-size: 11px; }.preview-scroll th { position: sticky; top: 0; text-align: left; color: #777; background: #fafafd; }.preview-scroll th,.preview-scroll td { padding: 10px 14px; border-bottom: 1px solid #eeeeF1; white-space: nowrap; }

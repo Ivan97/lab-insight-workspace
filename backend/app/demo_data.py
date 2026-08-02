@@ -46,6 +46,43 @@ PROJECT_BUDGETS = [
     for index, project in enumerate(PROJECTS)
 ]
 
+DEMO_FIELD_SAMPLES = {
+    "vendor-a-results.csv": {
+        "sample_no": ["AST-00001", "AST-00002"],
+        "test_item": ["Chemical Compatibility", "Thermal Cycling"],
+        "result": ["PASS", "FAIL"],
+        "cost": [97.61, 96.21],
+    },
+    "bluepeak-q2.xlsx": {
+        "specimen_id": ["BPQ2-00001", "BPQ2-00002"],
+        "analysis_name": ["Humidity Exposure", "Impact Resistance"],
+        "lab_status": ["OK", "NG"],
+        "invoice_amt": [91.31, 97.86],
+        "finish_dt": ["2026-03-08", "2026-02-28"],
+    },
+    "slack-lab-updates.txt": {
+        "sample_no": ["SLK-0001", "SLK-0002"],
+        "test_item": ["Tensile Strength", "Salt Spray"],
+        "result": ["passed", "failed"],
+        "cost": [104.22, 88.75],
+    },
+    "vendor-contracts.csv": {
+        "vendor": ["Aster Labs", "BluePeak"],
+        "contract_tier": ["Strategic", "Preferred"],
+        "contracted_cost_usd": [102.0, 85.0],
+        "sla_days": [8, 10],
+        "quality_target_pct": [0.92, 0.90],
+    },
+    "project-budgets.xlsx": {
+        "project": ["Project A", "Project B"],
+        "owner": ["Maya Chen", "Noah Williams"],
+        "priority": ["High", "Medium"],
+        "approved_budget_usd": [8500.0, 10250.0],
+        "start_date": ["2026-01-01", "2026-02-01"],
+        "end_date": ["2026-08-31", "2026-09-30"],
+    },
+}
+
 
 def initialize_demo(seed: int = 20260802) -> tuple[bool, int, list[str]]:
     with connection() as conn:
@@ -123,19 +160,28 @@ def _ensure_demo_batches(conn) -> list[str]:
 def _ensure_demo_payloads(conn) -> None:
     rows = conn.execute(
         """
-        SELECT b.batch_id, b.record_count, m.payload
+        SELECT b.batch_id, b.source_name, b.record_count, m.payload
         FROM ingestion_batches b
         JOIN field_mappings m USING (batch_id)
-        LEFT JOIN ingestion_payloads p USING (batch_id)
-        WHERE p.batch_id IS NULL
         """
     ).fetchall()
-    for batch_id, record_count, payload in rows:
+    for batch_id, source_name, record_count, payload in rows:
+        source_samples = DEMO_FIELD_SAMPLES.get(source_name)
+        if source_samples is None:
+            continue
         mappings = json.loads(payload)
+        for item in mappings:
+            samples = source_samples.get(item["source_field"], [])
+            item["sample_before"] = samples
+            item["sample_after"] = _normalized_samples(item["transform"], samples)
+        conn.execute(
+            "UPDATE field_mappings SET payload = ? WHERE batch_id = ?",
+            [json_dumps(mappings), batch_id],
+        )
         columns = [
             {
                 "name": item["source_field"],
-                "inferred_type": "String",
+                "inferred_type": _inferred_type(item["transform"]),
                 "null_rate": 0.0,
                 "distinct_count": min(record_count, 48),
                 "sample_values": item.get("sample_before", []),
@@ -153,9 +199,24 @@ def _ensure_demo_payloads(conn) -> None:
             "warnings": [],
         }
         conn.execute(
-            "INSERT INTO ingestion_payloads VALUES (?, ?, ?)",
+            "INSERT OR REPLACE INTO ingestion_payloads VALUES (?, ?, ?)",
             [batch_id, json_dumps(profile), json_dumps(preview)],
         )
+
+
+def _inferred_type(transform: str) -> str:
+    return {
+        "PARSE_DATE": "Date",
+        "PARSE_INTEGER": "Integer",
+        "PARSE_MONEY": "Decimal",
+        "PARSE_PERCENT": "Decimal",
+    }.get(transform, "String")
+
+
+def _normalized_samples(transform: str, samples: list) -> list:
+    if transform == "MAP_ENUM":
+        return [{"OK": "PASS", "NG": "FAIL", "passed": "PASS", "failed": "FAIL"}.get(value, value) for value in samples]
+    return samples
 
 
 def default_mappings(batch_id: str, source_type: str, source_name: str = "") -> list[dict]:

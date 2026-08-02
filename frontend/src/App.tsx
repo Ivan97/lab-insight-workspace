@@ -29,6 +29,13 @@ const navigation = [
   { id: 'analyze' as const, label: 'Analyze', icon: ChartNoAxesCombined },
 ]
 
+const canonicalFields = [
+  'sample_id', 'vendor', 'project', 'material', 'test_name', 'result', 'cost_amount',
+  'completed_date', 'lab_vendor', 'contract_tier', 'region', 'contracted_cost_usd',
+  'sla_days', 'quality_target_pct', 'owner', 'priority', 'approved_budget_usd',
+  'start_date', 'end_date',
+]
+
 export default function App() {
   const [page, setPage] = useState<Page>('sources')
   const [sources, setSources] = useState<Ingestion[]>([])
@@ -137,7 +144,7 @@ export default function App() {
         </header>
 
         {page === 'sources' && <SourcesPage sources={sources} refresh={refreshSources} openReview={openReview} />}
-        {page === 'schema' && <SchemaPage sources={sources} batchId={selectedBatch} onCommitted={refreshSources} onAnalyze={() => setPage('analyze')} />}
+        {page === 'schema' && <SchemaPage sources={sources} batchId={selectedBatch} onSelectBatch={setSelectedBatch} onCommitted={refreshSources} onAnalyze={() => setPage('analyze')} />}
         <div hidden={page !== 'analyze'}><AnalyzePage sessions={sessions} activeSessionId={activeSessionId} ask={ask} setRunning={setRunning} /></div>
       </main>
     </div>
@@ -203,7 +210,7 @@ function SourceRow({ source, openReview }: { source: Ingestion; openReview: (id:
   </div>
 }
 
-function SchemaPage({ sources, batchId, onCommitted, onAnalyze }: { sources: Ingestion[]; batchId: string | null; onCommitted: () => Promise<void>; onAnalyze: () => void }) {
+function SchemaPage({ sources, batchId, onSelectBatch, onCommitted, onAnalyze }: { sources: Ingestion[]; batchId: string | null; onSelectBatch: (batchId: string) => void; onCommitted: () => Promise<void>; onAnalyze: () => void }) {
   const [mapping, setMapping] = useState<MappingDraft | null>(null)
   const [profile, setProfile] = useState<DataProfile | null>(null)
   const [preview, setPreview] = useState<DataPreview | null>(null)
@@ -228,20 +235,25 @@ function SchemaPage({ sources, batchId, onCommitted, onAnalyze }: { sources: Ing
   }
 
   if (!source || !mapping) return <div className="page loading-state">Loading mapping…</div>
+  const attentionCount = mapping.mappings.filter((item) => item.confidence < .8).length
   return <div className="page schema-page">
     <section className="page-heading"><span className="eyebrow">SCHEMA REVIEW</span><h1>Make the meaning explicit.</h1><p>Review AI suggestions before anything enters the trusted analysis layer.</p></section>
-    <section className="review-summary section-card"><div className="source-name"><div className="file-icon xlsx">XLSX</div><div><strong>{source.source_name}</strong><small>{source.record_count} records · mapping version {mapping.version}</small></div></div><div className="review-progress"><span>{mapping.mappings.filter((item) => item.confidence >= .8).length} auto-mapped</span><span>{mapping.mappings.filter((item) => item.confidence < .8).length} need attention</span></div></section>
+    <section className="schema-source-switcher section-card" aria-label="Schema sources">
+      <div className="schema-source-switcher-head"><div><strong>Source schemas</strong><span>{sources.length} connected files</span></div><small>Select a file to inspect its profile and field mapping.</small></div>
+      <div className="schema-source-tabs" role="tablist">{sources.map((item) => <button role="tab" aria-selected={item.batch_id === source.batch_id} className={item.batch_id === source.batch_id ? 'active' : ''} key={item.batch_id} onClick={() => onSelectBatch(item.batch_id)}><span className={`mini-file-icon ${item.source_type.toLowerCase()}`}>{item.source_type === 'TEXT' ? 'TXT' : item.source_type}</span><span><strong>{item.source_name}</strong><small>{item.record_count.toLocaleString()} records</small></span></button>)}</div>
+    </section>
+    <section className="review-summary section-card"><div className="source-name"><div className={`file-icon ${source.source_type.toLowerCase()}`}>{source.source_type === 'TEXT' ? 'TXT' : source.source_type}</div><div><strong>{source.source_name}</strong><small>{source.record_count} records · mapping version {mapping.version}</small></div></div><div className="review-progress"><span>{mapping.mappings.filter((item) => item.confidence >= .8).length} auto-mapped</span><span>{attentionCount} need attention</span></div></section>
     {profile && preview && <section className="section-card data-review-card">
       <div className="review-tabs" role="tablist"><button className={reviewTab === 'profile' ? 'active' : ''} onClick={() => setReviewTab('profile')}>Data profile</button><button className={reviewTab === 'preview' ? 'active' : ''} onClick={() => setReviewTab('preview')}>Source preview</button><span>{profile.row_count.toLocaleString()} rows · {profile.column_count} fields</span></div>
-      {reviewTab === 'profile' ? <div className="profile-grid">{profile.columns.map((column) => <article key={column.name}><div><code>{column.name}</code><span>{column.inferred_type}</span></div><strong>{Math.round(column.null_rate * 100)}% <small>null</small></strong><p>{column.distinct_count.toLocaleString()} distinct · {column.sample_values.map(String).join(', ') || 'No sample'}</p>{column.warnings[0] && <em>{column.warnings[0]}</em>}</article>)}</div> : <div className="preview-scroll"><table><thead><tr>{Object.keys(preview.rows[0] ?? {}).map((key) => <th key={key}>{key}</th>)}</tr></thead><tbody>{preview.rows.map((row, index) => <tr key={index}>{Object.keys(preview.rows[0] ?? {}).map((key) => <td key={key}>{String(row[key] ?? '—')}</td>)}</tr>)}</tbody></table></div>}
+      {reviewTab === 'profile' ? <div className="profile-grid">{profile.columns.map((column) => { const missing = Math.round(column.null_rate * 100); return <article key={column.name}><div><code>{column.name}</code><span>{column.inferred_type}</span></div><strong>{100 - missing}% <small>complete</small></strong><p>{missing}% missing · {column.distinct_count.toLocaleString()} distinct</p><p>{column.sample_values.map(String).join(', ') || 'No sample values'}</p>{column.warnings[0] && <em>{column.warnings[0]}</em>}</article> })}</div> : <div className="preview-scroll"><table><thead><tr>{Object.keys(preview.rows[0] ?? {}).map((key) => <th key={key}>{key}</th>)}</tr></thead><tbody>{preview.rows.map((row, index) => <tr key={index}>{Object.keys(preview.rows[0] ?? {}).map((key) => <td key={key}>{String(row[key] ?? '—')}</td>)}</tr>)}</tbody></table></div>}
     </section>}
     <section className="section-card mapping-card">
-      <div className="section-header"><div><h2>Field mapping</h2><p>Original fields remain unchanged. These rules create the canonical view.</p></div><span className="status-badge review"><Activity size={13} /> Review required</span></div>
+      <div className="section-header"><div><h2>Field mapping</h2><p>Original fields remain unchanged. These rules create the canonical view.</p></div><span className={`status-badge ${attentionCount ? 'review' : 'ready'}`}>{attentionCount ? <Activity size={13} /> : <CheckCircle2 size={13} />}{attentionCount ? 'Review required' : 'Ready to publish'}</span></div>
       <div className="mapping-table">
         <div className="mapping-row mapping-head"><span>Source field</span><span>Sample value</span><span>Canonical field</span><span>Confidence</span><span>Transform</span></div>
         {mapping.mappings.map((item, index) => <div className={item.confidence < .8 ? 'mapping-row attention' : 'mapping-row'} key={item.source_field}>
           <code>{item.source_field}</code><span>{String(item.sample_before[0] ?? '—')}</span>
-          <select value={item.target_field ?? ''} onChange={(event) => updateTarget(index, event.target.value)}><option value="">Ignore field</option>{['sample_id','test_name','result','cost_amount','completed_date','lab_vendor'].map((field) => <option key={field}>{field}</option>)}</select>
+          <select value={item.target_field ?? ''} onChange={(event) => updateTarget(index, event.target.value)}><option value="">Ignore field</option>{canonicalFields.map((field) => <option key={field}>{field}</option>)}</select>
           <span className="confidence"><i style={{ width: `${item.confidence * 100}%` }} /><strong>{Math.round(item.confidence * 100)}%</strong></span>
           <span><code className="transform">{item.transform}</code>{item.warnings[0] && <small className="warning-copy">{item.warnings[0]}</small>}</span>
         </div>)}
