@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 from backend.app.a2ui import A2UIStream, validate_envelope
 from backend.app.analysis import run_analysis
+from backend.app.database import connection
 from backend.app.main import app
 from backend.app.model_client import OpenAICompatibleModel
 from backend.app.sql_guard import SQLGuardError, guard_sql
@@ -21,8 +22,17 @@ def test_demo_and_mapping_flow(client: TestClient):
     response = client.get("/api/v1/ingestions")
     assert response.status_code == 200
     payload = response.json()
-    assert payload["total"] >= 3
-    review_batch = next(item for item in payload["items"] if item["source_type"] == "XLSX")
+    assert payload["total"] >= 5
+    names = {item["source_name"] for item in payload["items"]}
+    assert {"vendor-contracts.csv", "project-budgets.xlsx"}.issubset(names)
+    downloadable = next(item for item in payload["items"] if item["source_name"] == "vendor-contracts.csv")
+    assert downloadable["download_url"]
+    download = client.get(downloadable["download_url"])
+    assert download.status_code == 200
+    assert b"contracted_cost_usd" in download.content
+    review_batch = next(
+        item for item in payload["items"] if item["source_name"] == "bluepeak-q2.xlsx"
+    )
     mapping = client.get(f"/api/v1/ingestions/{review_batch['batch_id']}/mapping").json()
     profile = client.get(f"/api/v1/ingestions/{review_batch['batch_id']}/profile").json()
     preview = client.get(f"/api/v1/ingestions/{review_batch['batch_id']}/preview").json()
@@ -33,17 +43,45 @@ def test_demo_and_mapping_flow(client: TestClient):
     assert any(item["confidence"] < 0.8 for item in mapping["mappings"])
     committed = client.post(f"/api/v1/ingestions/{review_batch['batch_id']}/commit").json()
     assert committed["status"] == "READY"
+    with connection() as conn:
+        conn.execute(
+            "UPDATE ingestion_batches SET status = 'NEEDS_REVIEW', "
+            "current_stage = 'Review field mapping' WHERE batch_id = ?",
+            [review_batch["batch_id"]],
+        )
 
 
 def test_sql_guard_accepts_analytics_and_rejects_unsafe_sql():
     guarded = guard_sql("SELECT vendor, count(*) FROM fact_test_results GROUP BY vendor")
     assert "fact_test_results" in guarded
+    joined = guard_sql(
+        "SELECT f.vendor, c.sla_days FROM fact_test_results f "
+        "JOIN dim_vendor_contracts c USING (vendor)"
+    )
+    assert "dim_vendor_contracts" in joined
     with pytest.raises(SQLGuardError):
         guard_sql("DROP TABLE fact_test_results")
     with pytest.raises(SQLGuardError):
         guard_sql("SELECT * FROM read_csv('secret.csv')")
     with pytest.raises(SQLGuardError):
         guard_sql("SELECT * FROM internal_users")
+
+
+def test_reference_tables_support_contract_and_budget_analysis(client: TestClient):
+    with connection() as conn:
+        contract_rows = conn.execute("SELECT count(*) FROM dim_vendor_contracts").fetchone()[0]
+        budget_rows = conn.execute("SELECT count(*) FROM dim_project_budgets").fetchone()[0]
+        joined = conn.execute(
+            """
+            SELECT count(*)
+            FROM fact_test_results f
+            JOIN dim_vendor_contracts c USING (vendor)
+            JOIN dim_project_budgets b USING (project)
+            """
+        ).fetchone()[0]
+    assert contract_rows == 6
+    assert budget_rows == 10
+    assert joined == 1000
 
 
 def test_llm_plan_executes_guarded_query(monkeypatch):

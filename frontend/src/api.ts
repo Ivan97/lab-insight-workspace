@@ -2,7 +2,7 @@ const API_BASE = '/api/v1'
 
 export interface Ingestion {
   batch_id: string; source_type: 'CSV' | 'XLSX' | 'TEXT'; source_name: string; vendor_hint: string | null
-  status: string; record_count: number; quality_score: number; current_stage: string | null; created_at: string; updated_at: string
+  status: string; record_count: number; quality_score: number; current_stage: string | null; created_at: string; updated_at: string; download_url: string | null
 }
 export interface FieldMapping { source_field: string; target_field: string | null; confidence: number; transform: string; reason: string; status: string; sample_before: unknown[]; sample_after: unknown[]; warnings: string[] }
 export interface MappingDraft { batch_id: string; version: number; mappings: FieldMapping[]; missing_required_fields: string[]; can_commit: boolean }

@@ -9,3 +9,5 @@ data/*.duckdb
 data/artifacts/
 .env
 .DS_Store
+.codex-work/
+outputs/

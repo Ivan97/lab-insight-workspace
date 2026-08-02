@@ -61,6 +61,23 @@ def init_schema() -> None:
                 cost_usd DOUBLE NOT NULL,
                 turnaround_days INTEGER
             );
+            CREATE TABLE IF NOT EXISTS dim_vendor_contracts (
+                vendor VARCHAR PRIMARY KEY,
+                contract_tier VARCHAR NOT NULL,
+                region VARCHAR NOT NULL,
+                contracted_cost_usd DOUBLE NOT NULL,
+                sla_days INTEGER NOT NULL,
+                quality_target_pct DOUBLE NOT NULL,
+                effective_date DATE NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS dim_project_budgets (
+                project VARCHAR PRIMARY KEY,
+                owner VARCHAR NOT NULL,
+                priority VARCHAR NOT NULL,
+                approved_budget_usd DOUBLE NOT NULL,
+                start_date DATE NOT NULL,
+                end_date DATE NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS conversations (
                 conversation_id VARCHAR PRIMARY KEY,
                 title VARCHAR NOT NULL,

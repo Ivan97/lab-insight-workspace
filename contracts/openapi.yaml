@@ -30,6 +30,18 @@ paths:
           content:
             application/json:
               schema: {$ref: "#/components/schemas/DemoInitializeResponse"}
+  /demo/files/{file_name}:
+    get:
+      summary: Download a bundled original demo source
+      operationId: downloadDemoFile
+      parameters:
+        - {name: file_name, in: path, required: true, schema: {type: string}}
+      responses:
+        "200":
+          description: Original demo source file
+          content:
+            application/octet-stream:
+              schema: {type: string, format: binary}
   /ingestions:
     get:
       summary: List ingestion batches
@@ -307,6 +319,7 @@ components:
         current_stage: {type: [string, "null"]}
         created_at: {type: string, format: date-time}
         updated_at: {type: string, format: date-time}
+        download_url: {type: [string, "null"]}
     FieldMapping:
       type: object
       required: [source_field, target_field, confidence, transform, reason, status]

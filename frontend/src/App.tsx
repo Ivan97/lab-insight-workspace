@@ -7,6 +7,7 @@ import {
   ChevronRight,
   CircleHelp,
   Database,
+  Download,
   FileSpreadsheet,
   LayoutDashboard,
   Menu,
@@ -135,7 +136,10 @@ function SourceRow({ source, openReview }: { source: Ingestion; openReview: (id:
     <span>{source.source_type}</span><span>{source.record_count.toLocaleString()}</span>
     <span className="quality-score"><i style={{ width: `${source.quality_score}%` }} />{source.quality_score}%</span>
     <span><span className={`status-badge ${isReady ? 'ready' : 'review'}`}>{isReady ? <CheckCircle2 size={13} /> : <Activity size={13} />}{isReady ? 'Ready' : 'Needs review'}</span></span>
-    <button className="row-action" onClick={() => openReview(source.batch_id)}>{isReady ? 'View' : 'Review'}<ArrowRight size={14} /></button>
+    <div className="row-actions">
+      {source.download_url && <a className="download-action" href={source.download_url} download aria-label={`Download ${source.source_name}`} title="Download original file"><Download size={14} /></a>}
+      <button className="row-action" onClick={() => openReview(source.batch_id)}>{isReady ? 'View' : 'Review'}<ArrowRight size={14} /></button>
+    </div>
   </div>
 }
 

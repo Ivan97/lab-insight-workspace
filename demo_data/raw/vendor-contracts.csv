@@ -1,0 +1,7 @@
+vendor,contract_tier,region,contracted_cost_usd,sla_days,quality_target_pct,effective_date
+Aster Labs,Strategic,North America,102,8,0.92,2026-01-01
+BluePeak,Preferred,Asia Pacific,85,10,0.9,2026-01-01
+CoreTest,Preferred,Europe,96,7,0.91,2026-01-01
+DeltaLab,Standard,North America,105,8,0.89,2026-01-01
+Element Six,Standard,Europe,101,7,0.9,2026-01-01
+Futura,Preferred,Asia Pacific,94,7,0.91,2026-01-01

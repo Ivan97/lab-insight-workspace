@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .a2ui import A2UIStream
-from .config import ARTIFACT_DIR, CATALOG_ID, FRONTEND_DIST
+from .config import ARTIFACT_DIR, CATALOG_ID, DEMO_SOURCE_DIR, FRONTEND_DIST
 from .database import connection, init_schema, json_dumps, rows_as_dicts, utcnow
 from .demo_data import default_mappings, initialize_demo
 from .profiling import preview_frame, profile_frame, profile_text
@@ -68,7 +68,7 @@ def list_ingestions() -> dict:
         items = rows_as_dicts(
             conn.execute("SELECT * FROM ingestion_batches ORDER BY created_at DESC")
         )
-    return {"items": items, "total": len(items)}
+    return {"items": [_with_download_url(item) for item in items], "total": len(items)}
 
 
 @app.get("/api/v1/ingestions/{batch_id}", response_model=IngestionBatch)
@@ -79,7 +79,26 @@ def get_ingestion(batch_id: str):
         )
     if not rows:
         raise HTTPException(404, "Ingestion batch not found")
-    return rows[0]
+    return _with_download_url(rows[0])
+
+
+def _with_download_url(item: dict) -> dict:
+    source_name = item["source_name"]
+    target = DEMO_SOURCE_DIR / source_name
+    return {
+        **item,
+        "download_url": f"/api/v1/demo/files/{source_name}" if target.is_file() else None,
+    }
+
+
+@app.get("/api/v1/demo/files/{file_name}")
+def download_demo_file(file_name: str):
+    if Path(file_name).name != file_name:
+        raise HTTPException(400, "Invalid file name")
+    target = DEMO_SOURCE_DIR / file_name
+    if not target.is_file():
+        raise HTTPException(404, "Demo source file not found")
+    return FileResponse(target, filename=file_name)
 
 
 @app.post("/api/v1/ingestions/files", status_code=202, response_model=IngestionBatch)
@@ -387,6 +406,18 @@ def suggestions():
                 "label": "Inspect quality risk",
                 "question": "Which materials have the highest failure rate?",
                 "category": "Quality",
+            },
+            {
+                "id": "contract",
+                "label": "Check contract performance",
+                "question": "Which vendors exceed contracted cost or SLA targets?",
+                "category": "Contract",
+            },
+            {
+                "id": "budget",
+                "label": "Review budget burn",
+                "question": "Compare actual spend with approved budget by project",
+                "category": "Budget",
             },
         ]
     }

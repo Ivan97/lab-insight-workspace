@@ -17,6 +17,7 @@ class IngestionBatch(BaseModel):
     current_stage: str | None = None
     created_at: datetime
     updated_at: datetime
+    download_url: str | None = None
 
 
 class FieldMapping(BaseModel):
