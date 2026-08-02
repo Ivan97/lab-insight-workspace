@@ -64,6 +64,9 @@ def test_demo_and_mapping_flow(client: TestClient):
 def test_sql_guard_accepts_analytics_and_rejects_unsafe_sql():
     guarded = guard_sql("SELECT vendor, count(*) FROM fact_test_results GROUP BY vendor")
     assert "fact_test_results" in guarded
+    assert "\n" in guarded
+    assert "  COUNT(*)" in guarded
+    assert guarded.endswith("LIMIT 200")
     joined = guard_sql(
         "SELECT f.vendor, c.sla_days FROM fact_test_results f "
         "JOIN dim_vendor_contracts c USING (vendor)"

@@ -44,4 +44,6 @@ def guard_sql(sql: str) -> str:
         raise SQLGuardError("Query must reference the approved analytical view")
     if statement.args.get("limit") is None:
         statement = statement.limit(200)
-    return statement.sql(dialect="duckdb", pretty=False)
+    # Serialize the validated AST once and reuse this exact SQL for EXPLAIN,
+    # execution, tool-call review, and the final disclosure panel.
+    return statement.sql(dialect="duckdb", pretty=True)
