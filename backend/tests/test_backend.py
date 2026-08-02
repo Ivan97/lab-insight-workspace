@@ -7,8 +7,11 @@ from backend.app.a2ui import A2UIStream, validate_envelope
 from backend.app.analysis import run_analysis
 from backend.app.database import connection
 from backend.app.main import app
-from backend.app.mcp_chart import AntVChartClient
-from backend.app.model_client import ANSWER_SYSTEM_PROMPT, OpenAICompatibleModel
+from backend.app.model_client import (
+    ANSWER_SYSTEM_PROMPT,
+    VISUALIZATION_SYSTEM_PROMPT,
+    OpenAICompatibleModel,
+)
 from backend.app.semantic import semantic_prompt_context
 from backend.app.sql_guard import SQLGuardError, guard_sql
 from backend.app.text_to_sql import SYSTEM_PROMPT, GeneratedPlan, ModelConfigurationError
@@ -132,6 +135,14 @@ def test_model_prompts_own_result_formatting_policy():
     assert "contract_tier" in context
 
 
+def test_visualization_is_selected_from_runtime_tools_not_planner_rules():
+    assert "generate_column_chart" not in SYSTEM_PROMPT
+    assert "generate_bar_chart" not in SYSTEM_PROMPT
+    assert "generate_line_chart" not in SYSTEM_PROMPT
+    assert "dynamically discovered MCP tools" in VISUALIZATION_SYSTEM_PROMPT
+    assert "selected tool's JSON Schema" in VISUALIZATION_SYSTEM_PROMPT
+
+
 def test_reference_tables_support_contract_and_budget_analysis(client: TestClient):
     with connection() as conn:
         contract_rows = conn.execute("SELECT count(*) FROM dim_vendor_contracts").fetchone()[0]
@@ -155,11 +166,6 @@ def test_llm_plan_executes_guarded_query(monkeypatch):
     plan = GeneratedPlan(
         intent="project_cost",
         sql="SELECT project, round(sum(cost_usd), 2) AS total_cost FROM fact_test_results GROUP BY project ORDER BY total_cost DESC",
-        title="Total cost by project",
-        tool_name="generate_column_chart",
-        x_field="project",
-        y_field="total_cost",
-        rationale="Compare project totals.",
         formats={"project": "TEXT", "total_cost": "CURRENCY_USD"},
     )
 
@@ -172,7 +178,7 @@ def test_llm_plan_executes_guarded_query(monkeypatch):
     analysis = run_analysis("Which projects cost the most?", events.append)
     assert analysis["table"]["rows"]
     assert "LIMIT 200" in analysis["sql"]
-    assert analysis["visualization"]["x_field"] == "project"
+    assert analysis["visualization"]["status"] == "PENDING"
     assert analysis["table"]["formats"]["total_cost"] == "CURRENCY_USD"
     totals = [row["total_cost"] for row in analysis["table"]["rows"]]
     assert all(value == round(value, 2) for value in totals)
@@ -216,23 +222,24 @@ def test_agent_events_preserve_interleaved_order():
     ]
 
 
-def test_antv_arguments_follow_mcp_schema():
-    arguments = AntVChartClient.arguments_for({
-        "tool_name": "generate_column_chart",
-        "data": [{"vendor": "BluePeak", "avg_cost_usd": 82.39}],
-        "x_field": "vendor",
-        "y_field": "avg_cost_usd",
-        "title": "Average cost",
-    })
-    assert arguments["data"] == [{"category": "BluePeak", "value": 82.39}]
-    assert arguments["group"] is False
-    assert "xField" not in arguments
-
-
 @pytest.mark.asyncio
 async def test_stream_is_ordered_and_completes(monkeypatch):
-    async def fake_render(self, visualization):
-        return {**visualization, "status": "SKIPPED", "asset_url": None}
+    async def fake_render(self, question, analysis, event_sink):
+        event_sink({
+            "type": "tool_call", "tool_call_id": "model:chart",
+            "name": "AntV MCP · generate_column_chart", "status": "RUNNING",
+            "arguments": {"data": [{"category": "A", "value": 2}]},
+        })
+        event_sink({
+            "type": "tool_result", "tool_call_id": "model:chart",
+            "name": "AntV MCP · generate_column_chart", "status": "COMPLETED",
+            "result": {"asset_url": "/api/v1/assets/chart.png"},
+        })
+        return {
+            **analysis["visualization"], "status": "READY",
+            "tool_name": "generate_column_chart", "title": "Tests",
+            "asset_url": "/api/v1/assets/chart.png",
+        }
 
     monkeypatch.setattr("backend.app.a2ui.AntVChartClient.render", fake_render)
     def fake_analysis(_question, event_sink):
@@ -249,7 +256,7 @@ async def test_stream_is_ordered_and_completes(monkeypatch):
             "table": {"columns": ["vendor", "tests"], "rows": [{"vendor": "A", "tests": 2}], "row_count": 1, "truncated": False},
             "insights": [],
             "sql": "SELECT vendor, count(*) AS tests FROM fact_test_results GROUP BY vendor LIMIT 200",
-            "visualization": {"status": "PENDING", "tool_name": "generate_column_chart", "title": "Tests", "rationale": "Comparison", "x_field": "vendor", "y_field": "tests", "data": [{"vendor": "A", "tests": 2}]},
+            "visualization": {"status": "PENDING", "data": [{"vendor": "A", "tests": 2}]},
             "warnings": [],
         }
 

@@ -27,11 +27,6 @@ def _empty_analysis(answer: str) -> dict[str, Any]:
         "sql": None,
         "visualization": {
             "status": "SKIPPED",
-            "tool_name": "generate_column_chart",
-            "title": "No chart generated",
-            "rationale": "A data question is required before querying the analytical view.",
-            "x_field": "",
-            "y_field": "",
             "data": [],
         },
         "warnings": [],
@@ -96,19 +91,6 @@ def _execute_plan(
             "result": {"error": str(exc)},
         })
         raise
-    if rows:
-        columns = set(rows[0])
-        if plan.x_field not in columns or plan.y_field not in columns:
-            error = "Chart fields do not match the SQL result aliases"
-            _emit(event_sink, {
-                "type": "tool_result",
-                "tool_call_id": query_id,
-                "name": "DuckDB · execute_query",
-                "status": "FAILED",
-                "arguments": {"sql": guarded_sql},
-                "result": {"error": error, "columns": list(rows[0])},
-            })
-            raise ValueError(error)
     json_rows = [{key: _to_json_value(value) for key, value in row.items()} for row in rows]
     _emit(event_sink, {
         "type": "tool_result",
@@ -202,11 +184,6 @@ def run_analysis(
         "sql": guarded_sql,
         "visualization": {
             "status": "PENDING" if rows else "SKIPPED",
-            "tool_name": plan.tool_name,
-            "title": plan.title,
-            "rationale": plan.rationale,
-            "x_field": plan.x_field,
-            "y_field": plan.y_field,
             "data": rows,
             "formats": plan.formats,
         },

@@ -118,39 +118,42 @@ class A2UIStream:
         if self._is_cancelled():
             yield self._sse(self._update("/status", "CANCELLED"))
             return
-        chart_tool = analysis["visualization"]["tool_name"]
         if analysis["visualization"]["status"] == "PENDING":
-            chart_call_id = f"antv:{chart_tool}"
             chart_client = AntVChartClient()
-            chart_arguments = chart_client.arguments_for(analysis["visualization"])
-            yield self._sse(
-                self._update_tool(
-                    chart_call_id,
-                    f"AntV MCP · {chart_tool}",
-                    "RUNNING",
-                    self._tool_sequence(chart_call_id),
-                    arguments=chart_arguments,
-                )
+            chart_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+            def receive_chart_event(event: dict[str, Any]) -> None:
+                chart_queue.put_nowait(event)
+
+            chart_task = asyncio.create_task(
+                chart_client.render(self.question, analysis, receive_chart_event)
             )
-            visualization = await chart_client.render(analysis["visualization"])
+            while not chart_task.done() or not chart_queue.empty():
+                try:
+                    event = await asyncio.wait_for(chart_queue.get(), timeout=0.05)
+                except TimeoutError:
+                    continue
+                if event["type"] == "reasoning_delta":
+                    yield self._sse(
+                        self._update_reasoning_delta(event["delta"], "RUNNING")
+                    )
+                    continue
+                tool_call_id = event["tool_call_id"]
+                yield self._sse(
+                    self._update_tool(
+                        tool_call_id,
+                        event["name"],
+                        event["status"],
+                        self._tool_sequence(tool_call_id),
+                        arguments=event.get("arguments"),
+                        result=event.get("result"),
+                    )
+                )
+            visualization = await chart_task
             if self._is_cancelled():
                 yield self._sse(self._update("/status", "CANCELLED"))
                 return
             analysis["visualization"] = visualization
-            yield self._sse(
-                self._update_tool(
-                    chart_call_id,
-                    f"AntV MCP · {chart_tool}",
-                    "COMPLETED" if visualization["status"] == "READY" else "FAILED",
-                    self._tool_sequence(chart_call_id),
-                    arguments=chart_arguments,
-                    result={
-                        "status": visualization["status"],
-                        "asset_url": visualization.get("asset_url"),
-                        "error": visualization.get("error"),
-                    },
-                )
-            )
 
         markdown = ""
         if analysis["requires_clarification"]:

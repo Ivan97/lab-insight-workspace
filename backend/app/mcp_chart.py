@@ -1,5 +1,6 @@
 import hashlib
 import os
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -7,40 +8,29 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
 from .config import ARTIFACT_DIR
+from .model_client import OpenAICompatibleModel
+
+ChartEventSink = Callable[[dict[str, Any]], None]
 
 
 class AntVChartClient:
     def __init__(self) -> None:
         self.url = os.getenv("MCP_CHART_URL", "http://localhost:1122/mcp")
 
-    @staticmethod
-    def arguments_for(visualization: dict[str, Any]) -> dict[str, Any]:
-        tool_name = visualization["tool_name"]
-        category_field = "time" if tool_name == "generate_line_chart" else "category"
-        data = [
-            {
-                category_field: str(row[visualization["x_field"]]),
-                "value": float(row[visualization["y_field"]]),
-            }
-            for row in visualization["data"]
-            if row.get(visualization["x_field"]) is not None
-            and isinstance(row.get(visualization["y_field"]), (int, float))
-        ]
-        arguments = {
-            "data": data,
-            "title": visualization["title"],
-            "axisXTitle": visualization["x_field"],
-            "axisYTitle": visualization["y_field"],
-            "width": 1200,
-            "height": 640,
-        }
-        if tool_name in {"generate_column_chart", "generate_bar_chart"}:
-            arguments.update({"group": False, "stack": False})
-        return arguments
-
-    async def render(self, visualization: dict[str, Any]) -> dict[str, Any]:
-        tool_name = visualization["tool_name"]
-        arguments = self.arguments_for(visualization)
+    async def render(
+        self,
+        question: str,
+        analysis: dict[str, Any],
+        event_sink: ChartEventSink | None = None,
+    ) -> dict[str, Any]:
+        visualization = analysis["visualization"]
+        discovery_id = "mcp:tools/list"
+        self._emit(event_sink, {
+            "type": "tool_call", "tool_call_id": discovery_id,
+            "name": "AntV MCP · tools/list", "status": "RUNNING",
+            "arguments": {},
+        })
+        selected_call_id: str | None = None
         try:
             async with (
                 httpx.AsyncClient(trust_env=False) as http_client,
@@ -52,21 +42,92 @@ class AntVChartClient:
                 ClientSession(read_stream, write_stream) as session,
             ):
                 await session.initialize()
-                result = await session.call_tool(tool_name, arguments)
+                discovered = await session.list_tools()
+                tools_by_name = {tool.name: tool for tool in discovered.tools}
+                self._emit(event_sink, {
+                    "type": "tool_result", "tool_call_id": discovery_id,
+                    "name": "AntV MCP · tools/list", "status": "COMPLETED",
+                    "arguments": {},
+                    "result": {
+                        "tool_count": len(discovered.tools),
+                        "tools": list(tools_by_name),
+                    },
+                })
+                model_tools = [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": tool.name,
+                            "description": tool.description or "",
+                            "parameters": tool.inputSchema,
+                        },
+                    }
+                    for tool in discovered.tools
+                ]
+                selected = await OpenAICompatibleModel().select_visualization_tool(
+                    {
+                        "question": question,
+                        "query_result": analysis["table"],
+                    },
+                    model_tools,
+                    reasoning_sink=lambda delta: self._emit(
+                        event_sink, {"type": "reasoning_delta", "delta": delta}
+                    ),
+                )
+                if selected is None:
+                    return {**visualization, "status": "SKIPPED", "asset_url": None}
+                if selected.name not in tools_by_name:
+                    raise ValueError("Visualization agent selected an undiscovered MCP tool")
+                selected_call_id = selected.tool_call_id
+                self._emit(event_sink, {
+                    "type": "tool_call", "tool_call_id": selected.tool_call_id,
+                    "name": f"AntV MCP · {selected.name}", "status": "RUNNING",
+                    "arguments": selected.arguments,
+                })
+                result = await session.call_tool(selected.name, selected.arguments)
             remote_url = self._extract_url(result.content)
             image_url = await self._cache_asset(remote_url) if remote_url else None
+            status = "READY" if image_url else "FAILED"
+            result_payload = {
+                "status": status,
+                "asset_url": image_url,
+                "mcp_content": [getattr(item, "text", None) for item in result.content],
+            }
+            self._emit(event_sink, {
+                "type": "tool_result", "tool_call_id": selected.tool_call_id,
+                "name": f"AntV MCP · {selected.name}",
+                "status": "COMPLETED" if image_url else "FAILED",
+                "arguments": selected.arguments, "result": result_payload,
+            })
             return {
                 **visualization,
-                "status": "READY" if image_url else "SKIPPED",
+                "status": status,
+                "tool_name": selected.name,
+                "title": str(selected.arguments.get("title") or selected.name),
+                "rationale": "",
                 "asset_url": image_url,
             }
         except Exception as exc:  # noqa: BLE001 - MCP failure must not fail analysis.
+            failed_id = selected_call_id or discovery_id
+            failed_name = (
+                "AntV MCP · tool call" if selected_call_id else "AntV MCP · tools/list"
+            )
+            self._emit(event_sink, {
+                "type": "tool_result", "tool_call_id": failed_id,
+                "name": failed_name, "status": "FAILED",
+                "result": {"error": f"{type(exc).__name__}: {exc}"},
+            })
             return {
                 **visualization,
-                "status": "SKIPPED",
+                "status": "FAILED",
                 "asset_url": None,
                 "error": f"AntV MCP unavailable: {type(exc).__name__}",
             }
+
+    @staticmethod
+    def _emit(event_sink: ChartEventSink | None, event: dict[str, Any]) -> None:
+        if event_sink:
+            event_sink(event)
 
     @staticmethod
     def _extract_url(content: list[Any]) -> str | None:
