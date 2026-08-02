@@ -8,6 +8,7 @@ from .analysis import run_analysis
 from .config import CATALOG_ID
 from .database import connection, json_dumps, utcnow
 from .mcp_chart import AntVChartClient
+from .model_client import OpenAICompatibleModel
 
 COMPONENTS = [
     {"id": "root", "component": "Column", "children": ["reasoning", "tools", "answer", "analysis"]},
@@ -110,11 +111,17 @@ class A2UIStream:
         yield self._sse(
             self._update_reasoning("正在把事实、口径和限制整理成可审阅的结论。", "RUNNING")
         )
-        words = analysis["answer"].split()
-        for end in range(4, len(words) + 4, 4):
-            markdown = " ".join(words[:end])
+        markdown = ""
+        body_chunk_count = 0
+        async for chunk in OpenAICompatibleModel().stream_answer(self.question, analysis):
+            body_chunk_count += 1
+            markdown += chunk
             self.model["content"]["markdown"] = markdown
             yield self._sse(self._update("/content/markdown", markdown))
+            if body_chunk_count == 2:
+                yield self._sse(
+                    self._update_reasoning("正文生成期间再次核对指标口径与图表证据。", "RUNNING")
+                )
             await asyncio.sleep(0.04)
 
         self.model["analysis"] = analysis

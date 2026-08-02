@@ -1,4 +1,5 @@
 import json
+import os
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -10,7 +11,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .a2ui import A2UIStream
-from .config import CATALOG_ID, FRONTEND_DIST
+from .config import ARTIFACT_DIR, CATALOG_ID, FRONTEND_DIST
 from .database import connection, init_schema, json_dumps, rows_as_dicts, utcnow
 from .demo_data import default_mappings, initialize_demo
 from .schemas import (
@@ -40,11 +41,15 @@ app.add_middleware(
 
 @app.get("/api/v1/health")
 def health() -> dict:
+    model_configured = bool(os.getenv("LLM_BASE_URL") and os.getenv("LLM_API_KEY"))
     return {
         "status": "ok",
         "version": "0.1.0",
         "database": {"status": "ready"},
-        "model": {"provider": "deterministic-demo", "configured": True},
+        "model": {
+            "provider": os.getenv("LLM_PROVIDER", "deterministic-demo"),
+            "configured": model_configured,
+        },
         "visualization_mcp": {"status": "optional", "url": "http://127.0.0.1:1122/mcp"},
     }
 
@@ -247,6 +252,15 @@ def stream_message(
                 "INSERT INTO stream_requests VALUES (?, ?, ?, ?, ?)",
                 [idempotency_key, conversation_id, message_id, request.question, utcnow()],
             )
+        else:
+            conn.execute(
+                "DELETE FROM a2ui_events WHERE message_id = ? AND sequence > ?",
+                [message_id, resume_after],
+            )
+            conn.execute(
+                "UPDATE messages SET status = 'STREAMING', completed_at = NULL WHERE message_id = ?",
+                [message_id],
+            )
     stream = A2UIStream(
         conversation_id, request.question, message_id=message_id, resume_after=resume_after
     )
@@ -281,6 +295,16 @@ def suggestions():
             },
         ]
     }
+
+
+@app.get("/api/v1/assets/{asset_name}")
+def asset(asset_name: str):
+    if Path(asset_name).name != asset_name:
+        raise HTTPException(400, "Invalid asset name")
+    target = ARTIFACT_DIR / asset_name
+    if not target.is_file():
+        raise HTTPException(404, "Asset not found")
+    return FileResponse(target)
 
 
 if FRONTEND_DIST.exists():

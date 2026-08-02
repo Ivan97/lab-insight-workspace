@@ -5,6 +5,7 @@ info:
   description: Versioned contract for ingestion, schema review, and A2UI-streamed analysis.
   license:
     name: Proprietary demo
+    identifier: LicenseRef-Proprietary
 servers:
   - url: /api/v1
 security: []
@@ -179,6 +180,18 @@ paths:
                 type: object
                 properties:
                   items: {type: array, items: {type: object}}
+  /assets/{asset_name}:
+    get:
+      summary: Read a validated same-origin chart asset
+      operationId: getAsset
+      parameters:
+        - {name: asset_name, in: path, required: true, schema: {type: string}}
+      responses:
+        "200":
+          description: Cached chart image
+          content:
+            image/png: {schema: {type: string, format: binary}}
+            image/jpeg: {schema: {type: string, format: binary}}
 components:
   schemas:
     HealthResponse:

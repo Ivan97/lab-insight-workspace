@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 from backend.app.a2ui import A2UIStream, validate_envelope
 from backend.app.main import app
+from backend.app.model_client import OpenAICompatibleModel
 
 
 @pytest.fixture
@@ -56,3 +57,17 @@ async def test_stream_is_ordered_and_completes(monkeypatch):
     ]
     assert "createSurface" in envelopes[0]
     assert envelopes[-1]["updateDataModel"]["value"] == "COMPLETED"
+
+
+@pytest.mark.asyncio
+async def test_unconfigured_model_fallback_still_streams(monkeypatch):
+    monkeypatch.delenv("LLM_BASE_URL", raising=False)
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    chunks = [
+        chunk
+        async for chunk in OpenAICompatibleModel().stream_answer(
+            "question", {"answer": "This deterministic answer is emitted in multiple visible chunks."}
+        )
+    ]
+    assert len(chunks) > 1
+    assert "".join(chunks) == "This deterministic answer is emitted in multiple visible chunks."
