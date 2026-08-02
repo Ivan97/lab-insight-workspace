@@ -61,6 +61,8 @@ def test_llm_plan_executes_guarded_query(monkeypatch):
     assert analysis["table"]["rows"]
     assert "LIMIT 200" in analysis["sql"]
     assert analysis["visualization"]["x_field"] == "project"
+    totals = [row["total_cost"] for row in analysis["table"]["rows"]]
+    assert all(value == round(value, 2) for value in totals)
 
 
 def test_a2ui_envelope_shape():

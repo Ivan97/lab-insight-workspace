@@ -103,7 +103,7 @@ function VisualizationPanel({ visualization }: { visualization: Visualization })
   const safeUrl = visualization.asset_url && isSafeImageUrl(visualization.asset_url) ? visualization.asset_url : null
   const max = Math.max(...(visualization.data ?? []).map((row) => Number(row[visualization.y_field]) || 0), 1)
   return <section className="visualization-panel"><div className="visualization-head"><div><span>VISUALIZATION AGENT</span><h3>{visualization.title}</h3><p>{visualization.rationale}</p></div><span className="mcp-chip">AntV MCP · {visualization.tool_name.replace('generate_', '').replace('_chart', '')}</span></div>
-    {safeUrl ? <SafeImage src={safeUrl} alt={visualization.title} /> : <div className="fallback-chart" aria-label={visualization.title}>{visualization.data.map((row) => <div className="bar-item" key={String(row[visualization.x_field])}><div className="bar-value">{row[visualization.y_field]}</div><div className="bar-track"><i style={{ height: `${(Number(row[visualization.y_field]) / max) * 100}%` }} /></div><span>{row[visualization.x_field]}</span></div>)}</div>}
+    {safeUrl ? <SafeImage src={safeUrl} alt={visualization.title} /> : <div className="fallback-chart" aria-label={visualization.title}>{visualization.data.map((row) => <div className="bar-item" key={String(row[visualization.x_field])}><div className="bar-value">{formatChartValue(row[visualization.y_field], visualization.y_field)}</div><div className="bar-track"><i style={{ height: `${(Number(row[visualization.y_field]) / max) * 100}%` }} /></div><span>{formatChartLabel(row[visualization.x_field])}</span></div>)}</div>}
   </section>
 }
 
@@ -130,6 +130,8 @@ function isSafeImageUrl(value: string) {
 }
 function formatKpi(kpi: Kpi) { if (kpi.format === 'CURRENCY_USD') return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(kpi.value); if (kpi.format === 'PERCENT') return `${kpi.value}%`; if (kpi.format === 'DAYS') return `${kpi.value} days`; return kpi.value.toLocaleString() }
 function humanize(value: string) { return value.replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase()) }
-function formatCell(value: string | number, column: string) { if (typeof value === 'number' && column.includes('cost')) return `$${value.toFixed(2)}`; if (typeof value === 'number' && column.includes('pct')) return `${value}%`; return value }
+function formatChartLabel(value: string | number) { const text = String(value); return /^\d{4}-\d{2}-\d{2}(?:[ T]00:00:00)?$/.test(text) ? text.slice(0, 10) : text }
+function formatChartValue(value: string | number, field: string) { if (typeof value !== 'number') return value; if (field.includes('cost')) return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value); if (field.includes('rate') && Math.abs(value) <= 1) return `${(value * 100).toFixed(2)}%`; return new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 }).format(value) }
+function formatCell(value: string | number, column: string) { if (typeof value === 'string') return formatChartLabel(value); if (column.includes('cost')) return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value); if (column.includes('rate') && Math.abs(value) <= 1) return `${(value * 100).toFixed(2)}%`; if (column.includes('pct')) return `${value.toFixed(2)}%`; return new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 }).format(value) }
 
 export const analyticsCatalog: Catalog<ReactComponentImplementation> = new Catalog(CATALOG_ID, [Column, ReasoningPanel, ToolCallGroup, RichMarkdown, AnalysisResult] as ReactComponentImplementation[])

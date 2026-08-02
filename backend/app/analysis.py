@@ -1,3 +1,5 @@
+from datetime import date, datetime, time
+from decimal import Decimal
 from typing import Any
 
 import duckdb
@@ -39,7 +41,19 @@ def _execute_plan(plan: GeneratedPlan) -> tuple[str, list[dict[str, Any]]]:
         columns = set(rows[0])
         if plan.x_field not in columns or plan.y_field not in columns:
             raise ValueError("Chart fields do not match the SQL result aliases")
-    return guarded_sql, rows
+    return guarded_sql, [
+        {key: _normalize_value(value) for key, value in row.items()} for row in rows
+    ]
+
+
+def _normalize_value(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return value.date().isoformat() if value.time() == time.min else value.isoformat(timespec="seconds")
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, (float, Decimal)):
+        return round(float(value), 2)
+    return value
 
 
 def run_analysis(question: str) -> dict[str, Any]:
