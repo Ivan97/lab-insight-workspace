@@ -40,7 +40,8 @@ def test_demo_and_mapping_flow(client: TestClient):
     assert profile["columns"]
     assert all("Example value" not in column["sample_values"] for column in profile["columns"])
     assert any(column["inferred_type"] == "Decimal" for column in profile["columns"])
-    assert preview["rows"]
+    assert len(preview["rows"]) == 20
+    assert all("Example value" not in row.values() for row in preview["rows"])
     assert mapping["can_commit"] is True
     assert any(item["confidence"] < 0.8 for item in mapping["mappings"])
     committed = client.post(f"/api/v1/ingestions/{review_batch['batch_id']}/commit").json()

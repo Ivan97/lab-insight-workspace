@@ -2,7 +2,12 @@ import json
 import random
 import uuid
 from datetime import date, timedelta
+from itertools import islice
 
+import polars as pl
+from openpyxl import load_workbook
+
+from .config import DEMO_SOURCE_DIR
 from .database import connection, json_dumps, utcnow
 
 VENDORS = ["Aster Labs", "BluePeak", "CoreTest", "DeltaLab", "Element Six", "Futura"]
@@ -189,8 +194,8 @@ def _ensure_demo_payloads(conn) -> None:
             }
             for item in mappings
         ]
-        preview = [
-            {item["source_field"]: (item.get("sample_before") or ["Example value"])[0] for item in mappings}
+        preview = _load_demo_preview(source_name) or [
+            {item["source_field"]: (item.get("sample_before") or [None])[0] for item in mappings}
         ]
         profile = {
             "row_count": record_count,
@@ -217,6 +222,37 @@ def _normalized_samples(transform: str, samples: list) -> list:
     if transform == "MAP_ENUM":
         return [{"OK": "PASS", "NG": "FAIL", "passed": "PASS", "failed": "FAIL"}.get(value, value) for value in samples]
     return samples
+
+
+def _load_demo_preview(source_name: str, limit: int = 20) -> list[dict]:
+    source_path = DEMO_SOURCE_DIR / source_name
+    if not source_path.is_file():
+        return []
+    suffix = source_path.suffix.lower()
+    if suffix == ".csv":
+        return pl.read_csv(source_path).head(limit).to_dicts()
+    if suffix == ".xlsx":
+        workbook = load_workbook(source_path, read_only=True, data_only=True)
+        try:
+            rows = workbook.worksheets[0].iter_rows(values_only=True)
+            header_row = next(rows, None)
+            if header_row is None:
+                return []
+            headers = [str(value) for value in header_row]
+            return [dict(zip(headers, row, strict=True)) for row in islice(rows, limit)]
+        finally:
+            workbook.close()
+    if suffix == ".txt":
+        messages = [
+            line.strip()
+            for line in source_path.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        return [
+            {"line_number": index, "message": message}
+            for index, message in enumerate(messages[:limit], start=1)
+        ]
+    return []
 
 
 def default_mappings(batch_id: str, source_type: str, source_name: str = "") -> list[dict]:
