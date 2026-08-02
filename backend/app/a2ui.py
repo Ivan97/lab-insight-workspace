@@ -37,6 +37,7 @@ class A2UIStream:
         question: str,
         message_id: str | None = None,
         resume_after: int = 0,
+        reasoning_enabled: bool = True,
     ) -> None:
         self.conversation_id = conversation_id
         self.question = question
@@ -44,6 +45,7 @@ class A2UIStream:
         self.surface_id = f"message:{self.message_id}"
         self.sequence = 0
         self.resume_after = resume_after
+        self.reasoning_enabled = reasoning_enabled
         self.tool_sequence = 0
         self.tool_sequences: dict[str, int] = {}
         self.model: dict[str, Any] = {
@@ -80,6 +82,8 @@ class A2UIStream:
         loop = asyncio.get_running_loop()
 
         def receive_analysis_event(event: dict[str, Any]) -> None:
+            if event["type"] == "reasoning_delta" and not self.reasoning_enabled:
+                return
             loop.call_soon_threadsafe(event_queue.put_nowait, event)
 
         analysis_task = asyncio.create_task(
@@ -123,6 +127,8 @@ class A2UIStream:
             chart_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
 
             def receive_chart_event(event: dict[str, Any]) -> None:
+                if event["type"] == "reasoning_delta" and not self.reasoning_enabled:
+                    return
                 chart_queue.put_nowait(event)
 
             chart_task = asyncio.create_task(
@@ -169,9 +175,12 @@ class A2UIStream:
                         yield self._sse(self._update("/status", "CANCELLED"))
                         return
                     if model_event["type"] == "reasoning_delta":
-                        yield self._sse(
-                            self._update_reasoning_delta(model_event["delta"], "RUNNING")
-                        )
+                        if self.reasoning_enabled:
+                            yield self._sse(
+                                self._update_reasoning_delta(
+                                    model_event["delta"], "RUNNING"
+                                )
+                            )
                         continue
                     chunk = model_event["delta"]
                     markdown += chunk
@@ -187,8 +196,9 @@ class A2UIStream:
 
         self.model["analysis"] = analysis
         yield self._sse(self._update("/analysis", analysis))
-        self.model["reasoning"]["status"] = "COMPLETED"
-        yield self._sse(self._complete_reasoning_events("COMPLETED"))
+        if self.reasoning_enabled:
+            self.model["reasoning"]["status"] = "COMPLETED"
+            yield self._sse(self._complete_reasoning_events("COMPLETED"))
         self.model["status"] = "COMPLETED"
         yield self._sse(self._update("/status", "COMPLETED"))
         self._complete_message()
@@ -352,8 +362,9 @@ class A2UIStream:
     async def _failure_events(self, message: str) -> AsyncIterator[str]:
         self.model["content"]["markdown"] = message
         yield self._sse(self._update_content(message))
-        self.model["reasoning"]["status"] = "COMPLETED"
-        yield self._sse(self._complete_reasoning_events("COMPLETED"))
+        if self.reasoning_enabled:
+            self.model["reasoning"]["status"] = "COMPLETED"
+            yield self._sse(self._complete_reasoning_events("COMPLETED"))
         self.model["status"] = "FAILED"
         yield self._sse(self._update("/status", "FAILED"))
         with connection() as conn:

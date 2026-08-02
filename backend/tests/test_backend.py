@@ -223,7 +223,16 @@ def test_agent_events_preserve_interleaved_order():
 
 
 @pytest.mark.asyncio
-async def test_stream_is_ordered_and_completes(monkeypatch):
+@pytest.mark.parametrize(
+    ("reasoning_enabled", "expected_event_types"),
+    [
+        (True, ["reasoning", "tool_group", "content"]),
+        (False, ["tool_group", "content"]),
+    ],
+)
+async def test_stream_is_ordered_and_completes(
+    monkeypatch, reasoning_enabled, expected_event_types
+):
     async def fake_render(self, question, analysis, event_sink):
         event_sink({
             "type": "tool_call", "tool_call_id": "model:chart",
@@ -268,7 +277,11 @@ async def test_stream_is_ordered_and_completes(monkeypatch):
     monkeypatch.setattr("backend.app.a2ui.OpenAICompatibleModel.stream_answer", fake_answer)
     with TestClient(app) as client:
         conversation = client.post("/api/v1/conversations").json()
-        stream = A2UIStream(conversation["conversation_id"], "Compare vendors")
+        stream = A2UIStream(
+            conversation["conversation_id"],
+            "Compare vendors",
+            reasoning_enabled=reasoning_enabled,
+        )
         chunks = [chunk async for chunk in stream.events()]
     chunks = [chunk for chunk in chunks if chunk]
     ids = [int(chunk.splitlines()[0].rsplit(":", 1)[1]) for chunk in chunks]
@@ -285,9 +298,11 @@ async def test_stream_is_ordered_and_completes(monkeypatch):
         if envelope.get("updateDataModel", {}).get("path") == "/events"
     ]
     final_events = event_updates[-1]
-    assert [event["type"] for event in final_events] == ["reasoning", "tool_group", "content"]
-    assert final_events[1]["calls"][0]["arguments"] == {"sql": "SELECT 1"}
-    assert final_events[2]["markdown"] == "A has 2 tests."
+    assert [event["type"] for event in final_events] == expected_event_types
+    tool_event = next(event for event in final_events if event["type"] == "tool_group")
+    content_event = next(event for event in final_events if event["type"] == "content")
+    assert tool_event["calls"][0]["arguments"] == {"sql": "SELECT 1"}
+    assert content_event["markdown"] == "A has 2 tests."
     with TestClient(app) as client:
         history = client.get(
             f"/api/v1/conversations/{conversation['conversation_id']}/messages"

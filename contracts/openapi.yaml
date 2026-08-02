@@ -374,6 +374,7 @@ components:
       required: [question, a2uiClientCapabilities]
       properties:
         question: {type: string, minLength: 1, maxLength: 1000}
+        reasoningEnabled: {type: boolean, default: true}
         filters: {type: object}
         a2uiClientCapabilities:
           type: object

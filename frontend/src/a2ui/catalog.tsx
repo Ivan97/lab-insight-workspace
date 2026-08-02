@@ -77,18 +77,23 @@ function ToolCallView({ calls: sourceCalls }: { calls: ToolCall[] }) {
       <span>{running ? <LoaderCircle size={15} className="spin" /> : cancelled ? <CircleStop size={15} /> : <Wrench size={15} />}{label}</span>
       <span className="tool-state">{running ? '运行中' : cancelled ? '已停止' : failed ? '部分失败' : '完成'} <ChevronRight size={14} /></span>
     </button>
-    {open && <div className="tool-list">{calls.map((call) => <div className="tool-item" key={call.toolCallId}>
+    {open && calls.length === 1 && <ToolDetail call={calls[0]} />}
+    {open && calls.length > 1 && <div className="tool-list">{calls.map((call) => <div className="tool-item" key={call.toolCallId}>
       <button onClick={() => setActive(active === call.toolCallId ? null : call.toolCallId)}>
         {call.status === 'RUNNING' ? <LoaderCircle size={14} className="spin" /> : call.status === 'FAILED' ? <CircleAlert size={14} /> : call.status === 'CANCELLED' ? <CircleStop size={14} /> : <Check size={14} />}
         <span>{call.displayName}</span><small>{call.status.toLowerCase()}</small><ChevronDown size={13} />
       </button>
-      {active === call.toolCallId && <div className="tool-detail">
-        <span>Tool call</span><code>{call.toolCallId}</code>
-        <span>Arguments</span><pre><code>{formatToolValue(call.arguments)}</code></pre>
-        <span>Result</span><pre><code>{formatToolValue(call.result ?? call.summary ?? 'Waiting for tool output…')}</code></pre>
-      </div>}
+      {active === call.toolCallId && <ToolDetail call={call} />}
     </div>)}</div>}
   </section>
+}
+
+function ToolDetail({ call }: { call: ToolCall }) {
+  return <div className="tool-detail">
+    <span>Tool call</span><code>{call.toolCallId}</code>
+    <span>Arguments</span><pre><code>{formatToolValue(call.arguments)}</code></pre>
+    <span>Result</span><pre><code>{formatToolValue(call.result ?? call.summary ?? 'Waiting for tool output…')}</code></pre>
+  </div>
 }
 
 const ToolCallGroup = createComponentImplementation(ToolApi, ({ props }) => {

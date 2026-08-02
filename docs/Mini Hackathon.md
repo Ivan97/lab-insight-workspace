@@ -1016,6 +1016,7 @@ P0 不实现删除数据接口，避免 Demo 误操作。会话生成是 P0 流�
 ```json
 {
   "question": "Compare cost, pass rate and turnaround time by vendor",
+  "reasoningEnabled": true,
   "filters": {
     "date_from": "2026-02-01",
     "date_to": "2026-08-01",
@@ -1030,7 +1031,7 @@ P0 不实现删除数据接口，避免 Demo 误操作。会话生成是 P0 流�
 }
 ```
 
-`question` 长度限制为 1–1,000 字符；前端筛选器是显式条件，后端必须将其与自然语言问题共同应用并在 Surface Data Model 中回显。客户端必须声明支持的 Catalog ID；服务端在创建 Surface 前完成协商，不支持时返回 `A2UI_CATALOG_UNSUPPORTED`，不能悄悄降级为未知组件。
+`question` 长度限制为 1–1,000 字符；`reasoningEnabled` 默认是 `true`，用于控制该轮是否把模型供应商原生返回的 reasoning 事件写入 A2UI 时间线，关闭时仍保留工具调用与正文事件，且不得生成替代性的思考文案。前端筛选器是显式条件，后端必须将其与自然语言问题共同应用并在 Surface Data Model 中回显。客户端必须声明支持的 Catalog ID；服务端在创建 Surface 前完成协商，不支持时返回 `A2UI_CATALOG_UNSUPPORTED`，不能悄悄降级为未知组件。
 
 #### AnalysisResult（A2UI Data Model 中的最终分析快照）
 

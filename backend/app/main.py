@@ -397,7 +397,11 @@ def stream_message(
                 [message_id],
             )
     stream = A2UIStream(
-        conversation_id, request.question, message_id=message_id, resume_after=resume_after
+        conversation_id,
+        request.question,
+        message_id=message_id,
+        resume_after=resume_after,
+        reasoning_enabled=request.reasoningEnabled,
     )
     return StreamingResponse(
         stream.events(),

@@ -5,7 +5,7 @@ import { analyticsCatalog, CATALOG_ID } from './catalog'
 import { api } from '../api'
 import { createUuid } from '../utils/id'
 
-export function A2UIConversation({ conversationId, question, onStreamingChange, onCancelReady }: { conversationId: string; question: string; onStreamingChange?: (streaming: boolean) => void; onCancelReady?: (cancel: (() => Promise<void>) | null) => void }) {
+export function A2UIConversation({ conversationId, question, reasoningEnabled, onStreamingChange, onCancelReady }: { conversationId: string; question: string; reasoningEnabled: boolean; onStreamingChange?: (streaming: boolean) => void; onCancelReady?: (cancel: (() => Promise<void>) | null) => void }) {
   const processorRef = useRef(new MessageProcessor([analyticsCatalog], undefined, { version: 'v0.9.1' }))
   const [surfaces, setSurfaces] = useState<SurfaceModel<ReactComponentImplementation>[]>([])
   const [error, setError] = useState<string | null>(null)
@@ -57,7 +57,7 @@ export function A2UIConversation({ conversationId, question, onStreamingChange, 
       }
     }
     onCancelReadyRef.current?.(cancel)
-    void streamMessage(conversationId, question, controller.signal, (messageId) => { messageIdRef.current = messageId }, (message) => {
+    void streamMessage(conversationId, question, reasoningEnabled, controller.signal, (messageId) => { messageIdRef.current = messageId }, (message) => {
       const update = (message as { updateDataModel?: { path?: string; value?: unknown } }).updateDataModel
       if (update?.path === '/toolGroups/analysis') toolGroupRef.current = update.value as Record<string, unknown>
       if (update?.path === '/events') eventStreamRef.current = update.value as Record<string, unknown>[]
@@ -66,18 +66,18 @@ export function A2UIConversation({ conversationId, question, onStreamingChange, 
     }).catch((reason: unknown) => { if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : 'Unable to stream analysis') })
       .finally(() => { onCancelReadyRef.current?.(null); onStreamingChangeRef.current?.(false) })
     return () => { onCancelReadyRef.current?.(null); controller.abort(); created.unsubscribe(); deleted.unsubscribe() }
-  }, [conversationId, question])
+  }, [conversationId, question, reasoningEnabled])
 
   if (error) return <div className="stream-error">{error}<button onClick={() => window.location.reload()}>Retry</button></div>
   if (!surfaces.length) return <div className="assistant-loading"><i /><span>Creating analysis surface…</span></div>
   return <div className="assistant-message">{surfaces.map((surface) => <A2uiSurface key={surface.id} surface={surface} />)}</div>
 }
 
-async function streamMessage(conversationId: string, question: string, signal: AbortSignal, onMessageId: (messageId: string) => void, onMessage: (message: A2uiMessage) => void) {
+async function streamMessage(conversationId: string, question: string, reasoningEnabled: boolean, signal: AbortSignal, onMessageId: (messageId: string) => void, onMessage: (message: A2uiMessage) => void) {
   const response = await fetch(`/api/v1/conversations/${conversationId}/messages/stream`, {
     method: 'POST', signal,
     headers: { 'Content-Type': 'application/json', 'Idempotency-Key': createUuid() },
-    body: JSON.stringify({ question, filters: {}, a2uiClientCapabilities: { supportedCatalogIds: [CATALOG_ID] } }),
+    body: JSON.stringify({ question, reasoningEnabled, filters: {}, a2uiClientCapabilities: { supportedCatalogIds: [CATALOG_ID] } }),
   })
   if (!response.ok || !response.body) throw new Error(await response.text() || 'Streaming endpoint unavailable')
   const responseMessageId = response.headers.get('X-Message-ID')

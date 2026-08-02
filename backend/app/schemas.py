@@ -73,6 +73,7 @@ class A2UIClientCapabilities(BaseModel):
 
 class CreateMessageRequest(BaseModel):
     question: str = Field(min_length=1, max_length=1_000)
+    reasoningEnabled: bool = True
     filters: dict[str, Any] = Field(default_factory=dict)
     a2uiClientCapabilities: A2UIClientCapabilities
 
