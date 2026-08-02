@@ -12,6 +12,9 @@ export function A2UIConversation({ conversationId, question, onStreamingChange }
   const [messageId, setMessageId] = useState<string | null>(null)
   const [streaming, setStreaming] = useState(true)
   const controllerRef = useRef<AbortController | null>(null)
+  const onStreamingChangeRef = useRef(onStreamingChange)
+
+  useEffect(() => { onStreamingChangeRef.current = onStreamingChange }, [onStreamingChange])
 
   useEffect(() => {
     const processor = processorRef.current
@@ -21,12 +24,12 @@ export function A2UIConversation({ conversationId, question, onStreamingChange }
     const controller = new AbortController()
     controllerRef.current = controller
     setStreaming(true)
-    onStreamingChange?.(true)
+    onStreamingChangeRef.current?.(true)
     void streamMessage(conversationId, question, controller.signal, setMessageId, (message) => {
       processor.processMessages([message])
       sync()
     }).catch((reason: unknown) => { if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : 'Unable to stream analysis') })
-      .finally(() => { setStreaming(false); onStreamingChange?.(false) })
+      .finally(() => { setStreaming(false); onStreamingChangeRef.current?.(false) })
     return () => { controller.abort(); created.unsubscribe(); deleted.unsubscribe() }
   }, [conversationId, question])
 
@@ -39,7 +42,7 @@ export function A2UIConversation({ conversationId, question, onStreamingChange }
     } finally {
       controllerRef.current?.abort()
       setStreaming(false)
-      onStreamingChange?.(false)
+      onStreamingChangeRef.current?.(false)
     }
   }
   return <div className="assistant-message">{surfaces.map((surface) => <A2uiSurface key={surface.id} surface={surface} />)}{streaming && messageId && <div className="stream-actions"><button onClick={() => void cancel()}>Stop response</button></div>}</div>
