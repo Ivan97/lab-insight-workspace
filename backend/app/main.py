@@ -464,4 +464,10 @@ if FRONTEND_DIST.exists():
     @app.get("/{path:path}")
     def frontend(path: str):
         candidate = FRONTEND_DIST / path
-        return FileResponse(candidate if candidate.is_file() else FRONTEND_DIST / "index.html")
+        target = candidate if candidate.is_file() else FRONTEND_DIST / "index.html"
+        headers = (
+            {"Cache-Control": "no-store, no-cache, must-revalidate"}
+            if target.name == "index.html"
+            else None
+        )
+        return FileResponse(target, headers=headers)
