@@ -1,7 +1,7 @@
 import json
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import ClassVar
 
 import httpx
@@ -37,6 +37,16 @@ Rules:
 - Never use external readers, DDL, DML, PRAGMA, ATTACH, COPY, or unapproved tables.
 - Prefer aggregate queries. Use DuckDB syntax and a maximum of 200 result rows.
 - SQL aliases must be simple snake_case names.
+- Treat result shape and presentation as part of the SQL contract:
+  - Counts stay INTEGER and use aliases ending in _count when practical.
+  - Currency values use aliases ending in _usd and must be explicitly ROUND(..., 2).
+  - Other calculated decimals and averages must be explicitly ROUND(..., 2).
+  - Rates must be returned on a 0-100 percentage scale, explicitly ROUND(..., 2), and use aliases ending in _pct. Never return a 0-1 fraction for display.
+  - Dates must be returned as text with strftime(date_expression, '%Y-%m-%d'). Do not expose 00:00:00 for date-only questions.
+  - Ordered month buckets must be returned as text with strftime(date_expression, '%Y-%m').
+  - Only return a timestamp when the user explicitly asks for time-of-day detail; then use '%Y-%m-%d %H:%M:%S'.
+- Return a formats entry for every selected alias. Allowed format values are TEXT, INTEGER,
+  DECIMAL_2, CURRENCY_USD, PERCENT_2, DATE, MONTH, and DATETIME.
 - Select one chart tool from generate_column_chart, generate_bar_chart, generate_line_chart.
 - x_field and y_field must exactly match selected SQL aliases.
 - Use a line chart for ordered time, a bar chart for long category labels, otherwise a column chart.
@@ -50,6 +60,7 @@ Required JSON shape:
   "tool_name": "generate_column_chart",
   "x_field": "selected_alias",
   "y_field": "selected_numeric_alias",
+  "formats": {"selected_alias": "TEXT", "selected_numeric_alias": "DECIMAL_2"},
   "rationale": "one sentence",
   "clarification": null or "short clarification"
 }
@@ -74,6 +85,7 @@ class GeneratedPlan:
     y_field: str
     rationale: str
     clarification: str | None = None
+    formats: dict[str, str] = field(default_factory=dict)
 
 
 class TextToSQLPlanner:
@@ -128,13 +140,21 @@ class TextToSQLPlanner:
     def _parse_plan(content: str) -> GeneratedPlan:
         cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip(), flags=re.IGNORECASE)
         payload = json.loads(cleaned)
-        required = {"intent", "title", "tool_name", "x_field", "y_field", "rationale"}
+        required = {"intent", "title", "tool_name", "x_field", "y_field", "formats", "rationale"}
         if not required.issubset(payload):
             raise ValueError("Planner response is missing required fields")
         sql = payload.get("sql")
         clarification = payload.get("clarification")
         if not sql and not clarification:
             raise ValueError("Planner response requires SQL or clarification")
+        formats = payload.get("formats")
+        allowed_formats = {
+            "TEXT", "INTEGER", "DECIMAL_2", "CURRENCY_USD", "PERCENT_2", "DATE", "MONTH", "DATETIME"
+        }
+        if not isinstance(formats, dict) or any(value not in allowed_formats for value in formats.values()):
+            raise ValueError("Planner response contains invalid result formats")
+        if sql and (str(payload["x_field"]) not in formats or str(payload["y_field"]) not in formats):
+            raise ValueError("Planner response is missing chart field formats")
         return GeneratedPlan(
             intent=str(payload["intent"]),
             sql=str(sql) if sql else None,
@@ -144,4 +164,5 @@ class TextToSQLPlanner:
             y_field=str(payload["y_field"]),
             rationale=str(payload["rationale"]),
             clarification=str(clarification) if clarification else None,
+            formats={str(key): str(value) for key, value in formats.items()},
         )

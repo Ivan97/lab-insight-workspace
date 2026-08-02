@@ -9,6 +9,21 @@ from .config import ROOT_DIR  # noqa: F401 - importing config loads local runtim
 from .text_to_sql import ModelConfigurationError, ModelRequestError
 
 
+ANSWER_SYSTEM_PROMPT = """You are a careful internal data analyst.
+Answer only from the supplied query result and never invent causes or numbers.
+Write concise Markdown: lead with the direct answer, then at most two evidence bullets.
+
+Presentation contract:
+- Preserve the values and units returned by SQL; do not recompute metrics.
+- Render date-only values as YYYY-MM-DD and month values as YYYY-MM. Never append 00:00:00.
+- Render currency in USD with a $ sign, thousands separators, and two decimal places.
+- Render percentages with a % sign and at most two decimal places. The SQL result is already on a 0-100 scale; never multiply it by 100 again.
+- Render other decimal measures with at most two decimal places and avoid floating-point noise.
+- Render counts as integers.
+- Use the supplied table.formats metadata as the authoritative formatting contract.
+"""
+
+
 class OpenAICompatibleModel:
     def __init__(self) -> None:
         self.base_url = os.getenv("LLM_BASE_URL", "").rstrip("/")
@@ -24,17 +39,15 @@ class OpenAICompatibleModel:
             raise ModelConfigurationError(
                 "LLM is not configured. Set LLM_BASE_URL, LLM_API_KEY and LLM_MODEL."
             )
-        prompt = (
-            "You are a careful internal data analyst. Answer only from the supplied query result. "
-            "Write concise Markdown: lead with the direct answer, then at most two evidence bullets. "
-            "Do not invent causes or numbers.\n\n"
-            f"Question: {question}\nAnalysis JSON: {json.dumps(analysis, ensure_ascii=False, default=str)}"
-        )
+        prompt = f"Question: {question}\nAnalysis JSON: {json.dumps(analysis, ensure_ascii=False, default=str)}"
         payload = {
             "model": self.model,
             "stream": True,
             "temperature": 0.1,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": [
+                {"role": "system", "content": ANSWER_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
         }
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
         url = f"{self.base_url}/chat/completions"

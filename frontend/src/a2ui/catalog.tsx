@@ -15,8 +15,9 @@ type ReasoningSegment = { id: string; text: string; createdAt: string }
 type ToolCall = { toolCallId: string; displayName: string; status: string; sequence: number; summary?: string }
 type ToolGroup = { groupId: string; calls: ToolCall[] }
 type Kpi = { key: string; label: string; value: number; format: string }
-type Visualization = { status: string; tool_name: string; title: string; rationale: string; asset_url?: string | null; error?: string; x_field: string; y_field: string; data: Record<string, string | number>[] }
-type Analysis = { answer: string; requires_clarification?: boolean; kpis: Kpi[]; table: { columns: string[]; rows: Record<string, string | number>[] }; insights: { kind: string; title: string; description: string }[]; sql: string | null; visualization: Visualization }
+type ResultFormat = 'TEXT' | 'INTEGER' | 'DECIMAL_2' | 'CURRENCY_USD' | 'PERCENT_2' | 'DATE' | 'MONTH' | 'DATETIME'
+type Visualization = { status: string; tool_name: string; title: string; rationale: string; asset_url?: string | null; error?: string; x_field: string; y_field: string; data: Record<string, string | number>[]; formats?: Record<string, ResultFormat> }
+type Analysis = { answer: string; requires_clarification?: boolean; kpis: Kpi[]; table: { columns: string[]; rows: Record<string, string | number>[]; formats?: Record<string, ResultFormat> }; insights: { kind: string; title: string; description: string }[]; sql: string | null; visualization: Visualization }
 
 const ReasoningApi = { name: 'ReasoningPanel', schema: z.object({ segments: CommonSchemas.DynamicValue, status: CommonSchemas.DynamicValue }) }
 const ToolApi = { name: 'ToolCallGroup', schema: z.object({ groups: CommonSchemas.DynamicValue }) }
@@ -94,7 +95,7 @@ const AnalysisResult = createComponentImplementation(AnalysisApi, ({ props }) =>
     <div className="kpi-grid">{analysis.kpis.map((kpi) => <div className="kpi-card" key={kpi.key}><span>{kpi.label}</span><strong>{formatKpi(kpi)}</strong></div>)}</div>
     <VisualizationPanel visualization={analysis.visualization} />
     <div className="insight-grid">{analysis.insights.map((insight) => <article key={insight.title}><span>{insight.kind}</span><h3>{insight.title}</h3><p>{insight.description}</p></article>)}</div>
-    <div className="result-table-wrap"><div className="result-title"><h3>Query result</h3><span>{analysis.table.rows.length} rows</span></div><div className="result-scroll"><table><thead><tr>{analysis.table.columns.map((column) => <th key={column}>{humanize(column)}</th>)}</tr></thead><tbody>{analysis.table.rows.map((row, index) => <tr key={index}>{analysis.table.columns.map((column) => <td key={column}>{formatCell(row[column], column)}</td>)}</tr>)}</tbody></table></div></div>
+    <div className="result-table-wrap"><div className="result-title"><h3>Query result</h3><span>{analysis.table.rows.length} rows</span></div><div className="result-scroll"><table><thead><tr>{analysis.table.columns.map((column) => <th key={column}>{humanize(column)}</th>)}</tr></thead><tbody>{analysis.table.rows.map((row, index) => <tr key={index}>{analysis.table.columns.map((column) => <td key={column}>{formatResultValue(row[column], analysis.table.formats?.[column])}</td>)}</tr>)}</tbody></table></div></div>
     <details className="sql-disclosure"><summary>View SQL & metric definitions <ChevronDown size={14} /></summary><pre><code>{analysis.sql}</code></pre></details>
   </div>
 })
@@ -103,7 +104,7 @@ function VisualizationPanel({ visualization }: { visualization: Visualization })
   const safeUrl = visualization.asset_url && isSafeImageUrl(visualization.asset_url) ? visualization.asset_url : null
   const max = Math.max(...(visualization.data ?? []).map((row) => Number(row[visualization.y_field]) || 0), 1)
   return <section className="visualization-panel"><div className="visualization-head"><div><span>VISUALIZATION AGENT</span><h3>{visualization.title}</h3><p>{visualization.rationale}</p></div><span className="mcp-chip">AntV MCP · {visualization.tool_name.replace('generate_', '').replace('_chart', '')}</span></div>
-    {safeUrl ? <SafeImage src={safeUrl} alt={visualization.title} /> : <div className="fallback-chart" aria-label={visualization.title}>{visualization.data.map((row) => <div className="bar-item" key={String(row[visualization.x_field])}><div className="bar-value">{formatChartValue(row[visualization.y_field], visualization.y_field)}</div><div className="bar-track"><i style={{ height: `${(Number(row[visualization.y_field]) / max) * 100}%` }} /></div><span>{formatChartLabel(row[visualization.x_field])}</span></div>)}</div>}
+    {safeUrl ? <SafeImage src={safeUrl} alt={visualization.title} /> : <div className="fallback-chart" aria-label={visualization.title}>{visualization.data.map((row) => <div className="bar-item" key={String(row[visualization.x_field])}><div className="bar-value">{formatResultValue(row[visualization.y_field], visualization.formats?.[visualization.y_field])}</div><div className="bar-track"><i style={{ height: `${(Number(row[visualization.y_field]) / max) * 100}%` }} /></div><span>{formatResultValue(row[visualization.x_field], visualization.formats?.[visualization.x_field])}</span></div>)}</div>}
   </section>
 }
 
@@ -130,8 +131,14 @@ function isSafeImageUrl(value: string) {
 }
 function formatKpi(kpi: Kpi) { if (kpi.format === 'CURRENCY_USD') return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(kpi.value); if (kpi.format === 'PERCENT') return `${kpi.value}%`; if (kpi.format === 'DAYS') return `${kpi.value} days`; return kpi.value.toLocaleString() }
 function humanize(value: string) { return value.replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase()) }
-function formatChartLabel(value: string | number) { const text = String(value); return /^\d{4}-\d{2}-\d{2}(?:[ T]00:00:00)?$/.test(text) ? text.slice(0, 10) : text }
-function formatChartValue(value: string | number, field: string) { if (typeof value !== 'number') return value; if (field.includes('cost')) return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value); if (field.includes('rate') && Math.abs(value) <= 1) return `${(value * 100).toFixed(2)}%`; return new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 }).format(value) }
-function formatCell(value: string | number, column: string) { if (typeof value === 'string') return formatChartLabel(value); if (column.includes('cost')) return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value); if (column.includes('rate') && Math.abs(value) <= 1) return `${(value * 100).toFixed(2)}%`; if (column.includes('pct')) return `${value.toFixed(2)}%`; return new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 }).format(value) }
+function formatResultValue(value: string | number, format?: ResultFormat) {
+  if (format === 'DATE') return String(value).slice(0, 10)
+  if (format === 'MONTH') return String(value).slice(0, 7)
+  if (typeof value !== 'number') return value
+  if (format === 'CURRENCY_USD') return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value)
+  if (format === 'PERCENT_2') return `${new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 }).format(value)}%`
+  if (format === 'INTEGER') return new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 }).format(value)
+  return new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 }).format(value)
+}
 
 export const analyticsCatalog: Catalog<ReactComponentImplementation> = new Catalog(CATALOG_ID, [Column, ReasoningPanel, ToolCallGroup, RichMarkdown, AnalysisResult] as ReactComponentImplementation[])

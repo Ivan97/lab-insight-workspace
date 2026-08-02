@@ -7,9 +7,9 @@ from backend.app.a2ui import A2UIStream, validate_envelope
 from backend.app.analysis import run_analysis
 from backend.app.database import connection
 from backend.app.main import app
-from backend.app.model_client import OpenAICompatibleModel
+from backend.app.model_client import ANSWER_SYSTEM_PROMPT, OpenAICompatibleModel
 from backend.app.sql_guard import SQLGuardError, guard_sql
-from backend.app.text_to_sql import GeneratedPlan, ModelConfigurationError
+from backend.app.text_to_sql import SYSTEM_PROMPT, GeneratedPlan, ModelConfigurationError
 
 
 @pytest.fixture
@@ -67,6 +67,14 @@ def test_sql_guard_accepts_analytics_and_rejects_unsafe_sql():
         guard_sql("SELECT * FROM internal_users")
 
 
+def test_model_prompts_own_result_formatting_policy():
+    assert "strftime(date_expression, '%Y-%m-%d')" in SYSTEM_PROMPT
+    assert "explicitly ROUND(..., 2)" in SYSTEM_PROMPT
+    assert "Never return a 0-1 fraction" in SYSTEM_PROMPT
+    assert "table.formats metadata" in ANSWER_SYSTEM_PROMPT
+    assert "never multiply it by 100 again" in ANSWER_SYSTEM_PROMPT
+
+
 def test_reference_tables_support_contract_and_budget_analysis(client: TestClient):
     with connection() as conn:
         contract_rows = conn.execute("SELECT count(*) FROM dim_vendor_contracts").fetchone()[0]
@@ -93,12 +101,14 @@ def test_llm_plan_executes_guarded_query(monkeypatch):
         x_field="project",
         y_field="total_cost",
         rationale="Compare project totals.",
+        formats={"project": "TEXT", "total_cost": "CURRENCY_USD"},
     )
     monkeypatch.setattr("backend.app.analysis.TextToSQLPlanner.generate", lambda *_args, **_kwargs: plan)
     analysis = run_analysis("Which projects cost the most?")
     assert analysis["table"]["rows"]
     assert "LIMIT 200" in analysis["sql"]
     assert analysis["visualization"]["x_field"] == "project"
+    assert analysis["table"]["formats"]["total_cost"] == "CURRENCY_USD"
     totals = [row["total_cost"] for row in analysis["table"]["rows"]]
     assert all(value == round(value, 2) for value in totals)
 

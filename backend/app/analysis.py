@@ -1,4 +1,4 @@
-from datetime import date, datetime, time
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -41,18 +41,17 @@ def _execute_plan(plan: GeneratedPlan) -> tuple[str, list[dict[str, Any]]]:
         columns = set(rows[0])
         if plan.x_field not in columns or plan.y_field not in columns:
             raise ValueError("Chart fields do not match the SQL result aliases")
-    return guarded_sql, [
-        {key: _normalize_value(value) for key, value in row.items()} for row in rows
-    ]
+    return guarded_sql, [{key: _to_json_value(value) for key, value in row.items()} for row in rows]
 
 
-def _normalize_value(value: Any) -> Any:
+def _to_json_value(value: Any) -> Any:
+    """Convert database-native objects for transport without applying display policy."""
     if isinstance(value, datetime):
-        return value.date().isoformat() if value.time() == time.min else value.isoformat(timespec="seconds")
+        return value.isoformat(timespec="seconds")
     if isinstance(value, date):
         return value.isoformat()
-    if isinstance(value, (float, Decimal)):
-        return round(float(value), 2)
+    if isinstance(value, Decimal):
+        return float(value)
     return value
 
 
@@ -106,6 +105,7 @@ def run_analysis(question: str) -> dict[str, Any]:
         ],
         "table": {
             "columns": list(rows[0]) if rows else [],
+            "formats": plan.formats,
             "rows": rows,
             "row_count": len(rows),
             "truncated": len(rows) == 200,
@@ -120,6 +120,7 @@ def run_analysis(question: str) -> dict[str, Any]:
             "x_field": plan.x_field,
             "y_field": plan.y_field,
             "data": rows,
+            "formats": plan.formats,
         },
         "warnings": ["Query returned no rows"] if not rows else [],
     }
