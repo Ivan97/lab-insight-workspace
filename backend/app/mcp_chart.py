@@ -15,14 +15,28 @@ class AntVChartClient:
 
     @staticmethod
     def arguments_for(visualization: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "data": visualization["data"],
-            "xField": visualization["x_field"],
-            "yField": visualization["y_field"],
+        tool_name = visualization["tool_name"]
+        category_field = "time" if tool_name == "generate_line_chart" else "category"
+        data = [
+            {
+                category_field: str(row[visualization["x_field"]]),
+                "value": float(row[visualization["y_field"]]),
+            }
+            for row in visualization["data"]
+            if row.get(visualization["x_field"]) is not None
+            and isinstance(row.get(visualization["y_field"]), (int, float))
+        ]
+        arguments = {
+            "data": data,
             "title": visualization["title"],
+            "axisXTitle": visualization["x_field"],
+            "axisYTitle": visualization["y_field"],
             "width": 1200,
             "height": 640,
         }
+        if tool_name in {"generate_column_chart", "generate_bar_chart"}:
+            arguments.update({"group": False, "stack": False})
+        return arguments
 
     async def render(self, visualization: dict[str, Any]) -> dict[str, Any]:
         tool_name = visualization["tool_name"]

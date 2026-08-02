@@ -11,15 +11,12 @@ from .mcp_chart import AntVChartClient
 from .model_client import OpenAICompatibleModel
 
 COMPONENTS = [
-    {"id": "root", "component": "Column", "children": ["reasoning", "tools", "answer", "analysis"]},
+    {"id": "root", "component": "Column", "children": ["eventStream", "analysis"]},
     {
-        "id": "reasoning",
-        "component": "ReasoningPanel",
-        "segments": {"path": "/reasoning/segments"},
-        "status": {"path": "/reasoning/status"},
+        "id": "eventStream",
+        "component": "AgentEventStream",
+        "events": {"path": "/events"},
     },
-    {"id": "tools", "component": "ToolCallGroup", "groups": {"path": "/toolGroups"}},
-    {"id": "answer", "component": "RichMarkdown", "markdown": {"path": "/content/markdown"}},
     {
         "id": "analysis",
         "component": "AnalysisResult",
@@ -50,6 +47,7 @@ class A2UIStream:
         self.tool_sequence = 0
         self.tool_sequences: dict[str, int] = {}
         self.model: dict[str, Any] = {
+            "events": [],
             "reasoning": {"segments": [], "status": "IDLE"},
             "content": {"markdown": ""},
             "toolGroups": {},
@@ -156,7 +154,7 @@ class A2UIStream:
         if analysis["requires_clarification"]:
             markdown = analysis["answer"]
             self.model["content"]["markdown"] = markdown
-            yield self._sse(self._update("/content/markdown", markdown))
+            yield self._sse(self._update_content(markdown))
         else:
             try:
                 async for chunk in OpenAICompatibleModel().stream_answer(self.question, analysis):
@@ -165,7 +163,7 @@ class A2UIStream:
                         return
                     markdown += chunk
                     self.model["content"]["markdown"] = markdown
-                    yield self._sse(self._update("/content/markdown", markdown))
+                    yield self._sse(self._update_content_delta(chunk))
                     await asyncio.sleep(0.04)
             except Exception as exc:  # noqa: BLE001 - expose failure instead of a fake fallback.
                 async for event in self._failure_events(
@@ -177,17 +175,26 @@ class A2UIStream:
         self.model["analysis"] = analysis
         yield self._sse(self._update("/analysis", analysis))
         self.model["reasoning"]["status"] = "COMPLETED"
-        yield self._sse(self._update("/reasoning/status", "COMPLETED"))
+        yield self._sse(self._complete_reasoning_events("COMPLETED"))
         self.model["status"] = "COMPLETED"
         yield self._sse(self._update("/status", "COMPLETED"))
         self._complete_message()
 
     def _update_reasoning(self, text: str, status: str) -> dict[str, Any]:
-        self.model["reasoning"]["segments"].append(
-            {"id": str(uuid.uuid4()), "text": text, "createdAt": datetime.now(UTC).isoformat()}
-        )
+        segment = {
+            "id": str(uuid.uuid4()), "text": text, "createdAt": datetime.now(UTC).isoformat()
+        }
+        self.model["reasoning"]["segments"].append(segment)
         self.model["reasoning"]["status"] = status
-        return self._update("/reasoning", self.model["reasoning"])
+        events = self.model["events"]
+        if events and events[-1]["type"] == "reasoning" and events[-1]["status"] == status:
+            events[-1]["segments"].append(segment)
+        else:
+            events.append({
+                "id": str(uuid.uuid4()), "type": "reasoning",
+                "segments": [segment], "status": status,
+            })
+        return self._update("/events", events)
 
     def _update_tool(
         self,
@@ -216,7 +223,43 @@ class A2UIStream:
             existing.update(payload)
         else:
             group["calls"].append(payload)
-        return self._update("/toolGroups/analysis", group)
+        events = self.model["events"]
+        event_call = None
+        for event in events:
+            if event["type"] == "tool_group":
+                event_call = next(
+                    (call for call in event["calls"] if call["toolCallId"] == key), None
+                )
+                if event_call:
+                    break
+        if event_call:
+            event_call.update(payload)
+        elif events and events[-1]["type"] == "tool_group":
+            events[-1]["calls"].append(payload.copy())
+        else:
+            events.append({
+                "id": str(uuid.uuid4()), "type": "tool_group", "calls": [payload.copy()]
+            })
+        return self._update("/events", events)
+
+    def _update_content(self, markdown: str) -> dict[str, Any]:
+        events = self.model["events"]
+        events.append({"id": str(uuid.uuid4()), "type": "content", "markdown": markdown})
+        return self._update("/events", events)
+
+    def _update_content_delta(self, chunk: str) -> dict[str, Any]:
+        events = self.model["events"]
+        if events and events[-1]["type"] == "content":
+            events[-1]["markdown"] += chunk
+        else:
+            events.append({"id": str(uuid.uuid4()), "type": "content", "markdown": chunk})
+        return self._update("/events", events)
+
+    def _complete_reasoning_events(self, status: str) -> dict[str, Any]:
+        for event in self.model["events"]:
+            if event["type"] == "reasoning" and event["status"] == "RUNNING":
+                event["status"] = status
+        return self._update("/events", self.model["events"])
 
     def _tool_sequence(self, tool_call_id: str) -> int:
         if tool_call_id not in self.tool_sequences:
@@ -276,9 +319,9 @@ class A2UIStream:
 
     async def _failure_events(self, message: str) -> AsyncIterator[str]:
         self.model["content"]["markdown"] = message
-        yield self._sse(self._update("/content/markdown", message))
+        yield self._sse(self._update_content(message))
         self.model["reasoning"]["status"] = "COMPLETED"
-        yield self._sse(self._update("/reasoning/status", "COMPLETED"))
+        yield self._sse(self._complete_reasoning_events("COMPLETED"))
         self.model["status"] = "FAILED"
         yield self._sse(self._update("/status", "FAILED"))
         with connection() as conn:

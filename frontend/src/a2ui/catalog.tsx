@@ -14,6 +14,10 @@ export const CATALOG_ID = 'https://mini-hackathon.local/a2ui/catalogs/analytics-
 type ReasoningSegment = { id: string; text: string; createdAt: string }
 type ToolCall = { toolCallId: string; displayName: string; status: string; sequence: number; summary?: string; arguments?: unknown; result?: unknown }
 type ToolGroup = { groupId: string; calls: ToolCall[] }
+type AgentEvent =
+  | { id: string; type: 'reasoning'; segments: ReasoningSegment[]; status: string }
+  | { id: string; type: 'tool_group'; calls: ToolCall[] }
+  | { id: string; type: 'content'; markdown: string }
 type Kpi = { key: string; label: string; value: number; format: string }
 type ResultFormat = 'TEXT' | 'INTEGER' | 'DECIMAL_2' | 'CURRENCY_USD' | 'PERCENT_2' | 'DATE' | 'MONTH' | 'DATETIME'
 type Visualization = { status: string; tool_name: string; title: string; rationale: string; asset_url?: string | null; error?: string; x_field: string; y_field: string; data: Record<string, string | number>[]; formats?: Record<string, ResultFormat> }
@@ -22,11 +26,10 @@ type Analysis = { answer: string; requires_clarification?: boolean; kpis: Kpi[];
 const ReasoningApi = { name: 'ReasoningPanel', schema: z.object({ segments: CommonSchemas.DynamicValue, status: CommonSchemas.DynamicValue }) }
 const ToolApi = { name: 'ToolCallGroup', schema: z.object({ groups: CommonSchemas.DynamicValue }) }
 const MarkdownApi = { name: 'RichMarkdown', schema: z.object({ markdown: CommonSchemas.DynamicValue }) }
+const EventStreamApi = { name: 'AgentEventStream', schema: z.object({ events: CommonSchemas.DynamicValue }) }
 const AnalysisApi = { name: 'AnalysisResult', schema: z.object({ analysis: CommonSchemas.DynamicValue, artifacts: CommonSchemas.DynamicValue }) }
 
-const ReasoningPanel = createComponentImplementation(ReasoningApi, ({ props }) => {
-  const segments = (props.segments ?? []) as ReasoningSegment[]
-  const status = String(props.status ?? 'IDLE')
+function ReasoningView({ segments, status }: { segments: ReasoningSegment[]; status: string }) {
   const [expanded, setExpanded] = useState(false)
   const [manuallyExpanded, setManuallyExpanded] = useState(false)
   const previousStatus = useRef(status)
@@ -49,15 +52,15 @@ const ReasoningPanel = createComponentImplementation(ReasoningApi, ({ props }) =
     </button>
     <div className="reasoning-content">{segments.map((segment) => <p key={segment.id}>{segment.text}</p>)}</div>
   </section>
-})
+}
 
-const ToolCallGroup = createComponentImplementation(ToolApi, ({ props }) => {
-  const groups = props.groups as unknown as Record<string, ToolGroup> | undefined
-  const group = groups ? Object.values(groups)[0] : undefined
+const ReasoningPanel = createComponentImplementation(ReasoningApi, ({ props }) => <ReasoningView segments={(props.segments ?? []) as ReasoningSegment[]} status={String(props.status ?? 'IDLE')} />)
+
+function ToolCallView({ calls: sourceCalls }: { calls: ToolCall[] }) {
   const [open, setOpen] = useState(false)
   const [active, setActive] = useState<string | null>(null)
-  if (!group?.calls.length) return null
-  const calls = [...group.calls].sort((a, b) => a.sequence - b.sequence)
+  if (!sourceCalls.length) return null
+  const calls = [...sourceCalls].sort((a, b) => a.sequence - b.sequence)
   const running = calls.some((call) => call.status === 'RUNNING')
   const cancelled = calls.some((call) => call.status === 'CANCELLED')
   const failed = calls.some((call) => call.status === 'FAILED')
@@ -79,10 +82,15 @@ const ToolCallGroup = createComponentImplementation(ToolApi, ({ props }) => {
       </div>}
     </div>)}</div>}
   </section>
+}
+
+const ToolCallGroup = createComponentImplementation(ToolApi, ({ props }) => {
+  const groups = props.groups as unknown as Record<string, ToolGroup> | undefined
+  const group = groups ? Object.values(groups)[0] : undefined
+  return <ToolCallView calls={group?.calls ?? []} />
 })
 
-const RichMarkdown = createComponentImplementation(MarkdownApi, ({ props }) => {
-  const markdown = String(props.markdown ?? '')
+function MarkdownView({ markdown }: { markdown: string }) {
   if (!markdown) return null
   return <div className="rich-markdown"><ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]} components={{
     code({ className, children, ...rest }) {
@@ -92,6 +100,18 @@ const RichMarkdown = createComponentImplementation(MarkdownApi, ({ props }) => {
     },
     img({ src, alt }) { return <SafeImage src={src} alt={alt ?? 'Generated artifact'} /> },
   }}>{markdown}</ReactMarkdown></div>
+}
+
+const RichMarkdown = createComponentImplementation(MarkdownApi, ({ props }) => <MarkdownView markdown={String(props.markdown ?? '')} />)
+
+const AgentEventStream = createComponentImplementation(EventStreamApi, ({ props }) => {
+  const events = (props.events ?? []) as AgentEvent[]
+  return <div className="agent-event-stream">{events.map((event) => {
+    if (event.type === 'reasoning') return <ReasoningView key={event.id} segments={event.segments} status={event.status} />
+    if (event.type === 'tool_group') return <ToolCallView key={event.id} calls={event.calls} />
+    if (event.type === 'content') return <MarkdownView key={event.id} markdown={event.markdown} />
+    return null
+  })}</div>
 })
 
 const AnalysisResult = createComponentImplementation(AnalysisApi, ({ props }) => {
@@ -148,4 +168,4 @@ function formatResultValue(value: string | number, format?: ResultFormat) {
   return new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 }).format(value)
 }
 
-export const analyticsCatalog: Catalog<ReactComponentImplementation> = new Catalog(CATALOG_ID, [Column, ReasoningPanel, ToolCallGroup, RichMarkdown, AnalysisResult] as ReactComponentImplementation[])
+export const analyticsCatalog: Catalog<ReactComponentImplementation> = new Catalog(CATALOG_ID, [Column, AgentEventStream, ReasoningPanel, ToolCallGroup, RichMarkdown, AnalysisResult] as ReactComponentImplementation[])

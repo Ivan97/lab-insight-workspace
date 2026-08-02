@@ -7,6 +7,7 @@ from backend.app.a2ui import A2UIStream, validate_envelope
 from backend.app.analysis import run_analysis
 from backend.app.database import connection
 from backend.app.main import app
+from backend.app.mcp_chart import AntVChartClient
 from backend.app.model_client import ANSWER_SYSTEM_PROMPT, OpenAICompatibleModel
 from backend.app.semantic import semantic_prompt_context
 from backend.app.sql_guard import SQLGuardError, guard_sql
@@ -198,6 +199,32 @@ def test_a2ui_envelope_shape():
     validate_envelope(envelope)
 
 
+def test_agent_events_preserve_interleaved_order():
+    stream = A2UIStream("conversation", "question")
+    stream._update_reasoning("先确认指标口径。", "RUNNING")
+    stream._update_tool("query", "DuckDB · execute_query", "RUNNING", 1, arguments={"sql": "SELECT 1"})
+    stream._update_content_delta("先给出部分结论。")
+    stream._update_tool("chart", "AntV MCP · generate_column_chart", "RUNNING", 2)
+    stream._update_content_delta("工具返回后继续正文。")
+
+    assert [event["type"] for event in stream.model["events"]] == [
+        "reasoning", "tool_group", "content", "tool_group", "content",
+    ]
+
+
+def test_antv_arguments_follow_mcp_schema():
+    arguments = AntVChartClient.arguments_for({
+        "tool_name": "generate_column_chart",
+        "data": [{"vendor": "BluePeak", "avg_cost_usd": 82.39}],
+        "x_field": "vendor",
+        "y_field": "avg_cost_usd",
+        "title": "Average cost",
+    })
+    assert arguments["data"] == [{"category": "BluePeak", "value": 82.39}]
+    assert arguments["group"] is False
+    assert "xField" not in arguments
+
+
 @pytest.mark.asyncio
 async def test_stream_is_ordered_and_completes(monkeypatch):
     async def fake_render(self, visualization):
@@ -241,12 +268,15 @@ async def test_stream_is_ordered_and_completes(monkeypatch):
     ]
     assert "createSurface" in envelopes[0]
     assert envelopes[-1]["updateDataModel"]["value"] == "COMPLETED"
-    tool_updates = [
+    event_updates = [
         envelope["updateDataModel"]["value"]
         for envelope in envelopes
-        if envelope.get("updateDataModel", {}).get("path") == "/toolGroups/analysis"
+        if envelope.get("updateDataModel", {}).get("path") == "/events"
     ]
-    assert tool_updates[0]["calls"][0]["arguments"] == {"sql": "SELECT 1"}
+    final_events = event_updates[-1]
+    assert [event["type"] for event in final_events] == ["reasoning", "tool_group", "content"]
+    assert final_events[1]["calls"][0]["arguments"] == {"sql": "SELECT 1"}
+    assert final_events[2]["markdown"] == "A has 2 tests."
     with TestClient(app) as client:
         history = client.get(
             f"/api/v1/conversations/{conversation['conversation_id']}/messages"

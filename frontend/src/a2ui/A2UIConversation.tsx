@@ -11,6 +11,7 @@ export function A2UIConversation({ conversationId, question, onStreamingChange, 
   const [error, setError] = useState<string | null>(null)
   const messageIdRef = useRef<string | null>(null)
   const toolGroupRef = useRef<Record<string, unknown> | null>(null)
+  const eventStreamRef = useRef<Record<string, unknown>[] | null>(null)
   const onStreamingChangeRef = useRef(onStreamingChange)
   const onCancelReadyRef = useRef(onCancelReady)
 
@@ -35,9 +36,18 @@ export function A2UIConversation({ conversationId, question, onStreamingChange, 
             ...toolGroupRef.current,
             calls: ((toolGroupRef.current.calls as Record<string, unknown>[] | undefined) ?? []).map((call) => call.status === 'RUNNING' ? { ...call, status: 'CANCELLED', summary: 'Stopped by user' } : call),
           } : null
+          const cancelledEvents = eventStreamRef.current?.map((event) => {
+            if (event.type === 'reasoning' && event.status === 'RUNNING') return { ...event, status: 'CANCELLED' }
+            if (event.type !== 'tool_group') return event
+            return {
+              ...event,
+              calls: ((event.calls as Record<string, unknown>[] | undefined) ?? []).map((call) => call.status === 'RUNNING' ? { ...call, status: 'CANCELLED', summary: 'Stopped by user' } : call),
+            }
+          }) ?? null
           processor.processMessages([
             { version: 'v0.9.1', updateDataModel: { surfaceId, path: '/reasoning/status', value: 'CANCELLED' } },
             ...(cancelledGroup ? [{ version: 'v0.9.1' as const, updateDataModel: { surfaceId, path: '/toolGroups/analysis', value: cancelledGroup } }] : []),
+            ...(cancelledEvents ? [{ version: 'v0.9.1' as const, updateDataModel: { surfaceId, path: '/events', value: cancelledEvents } }] : []),
             { version: 'v0.9.1', updateDataModel: { surfaceId, path: '/status', value: 'CANCELLED' } },
           ])
           sync()
@@ -50,6 +60,7 @@ export function A2UIConversation({ conversationId, question, onStreamingChange, 
     void streamMessage(conversationId, question, controller.signal, (messageId) => { messageIdRef.current = messageId }, (message) => {
       const update = (message as { updateDataModel?: { path?: string; value?: unknown } }).updateDataModel
       if (update?.path === '/toolGroups/analysis') toolGroupRef.current = update.value as Record<string, unknown>
+      if (update?.path === '/events') eventStreamRef.current = update.value as Record<string, unknown>[]
       processor.processMessages([message])
       sync()
     }).catch((reason: unknown) => { if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : 'Unable to stream analysis') })

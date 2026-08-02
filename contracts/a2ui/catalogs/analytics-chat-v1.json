@@ -6,6 +6,7 @@
   "catalogId": "https://mini-hackathon.local/a2ui/catalogs/analytics-chat/v1",
   "components": {
     "Column": {"$ref": "#/$defs/Column"},
+    "AgentEventStream": {"$ref": "#/$defs/AgentEventStream"},
     "ReasoningPanel": {"$ref": "#/$defs/ReasoningPanel"},
     "ToolCallGroup": {"$ref": "#/$defs/ToolCallGroup"},
     "RichMarkdown": {"$ref": "#/$defs/RichMarkdown"},
@@ -66,6 +67,20 @@
       ],
       "unevaluatedProperties": false
     },
+    "AgentEventStream": {
+      "allOf": [
+        {"$ref": "#/$defs/ComponentBase"},
+        {
+          "type": "object",
+          "properties": {
+            "component": {"const": "AgentEventStream"},
+            "events": {"$ref": "#/$defs/DynamicValue"}
+          },
+          "required": ["component", "events"]
+        }
+      ],
+      "unevaluatedProperties": false
+    },
     "ToolCallGroup": {
       "allOf": [
         {"$ref": "#/$defs/ComponentBase"},
@@ -119,6 +134,7 @@
     "anyComponent": {
       "oneOf": [
         {"$ref": "#/components/Column"},
+        {"$ref": "#/components/AgentEventStream"},
         {"$ref": "#/components/ReasoningPanel"},
         {"$ref": "#/components/ToolCallGroup"},
         {"$ref": "#/components/RichMarkdown"},
