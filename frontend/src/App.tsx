@@ -21,6 +21,7 @@ import { api, type DataPreview, type DataProfile, type Ingestion, type MappingDr
 import './App.css'
 
 type Page = 'sources' | 'schema' | 'analyze'
+type Session = { id: string; title: string; turns: string[]; running: boolean }
 
 const navigation = [
   { id: 'sources' as const, label: 'Sources', icon: Database },
@@ -33,6 +34,11 @@ export default function App() {
   const [sources, setSources] = useState<Ingestion[]>([])
   const [selectedBatch, setSelectedBatch] = useState<string | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(true)
+  const [sessions, setSessions] = useState<Session[]>([])
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
+  const [creatingSession, setCreatingSession] = useState(false)
+  const runningRefs = useRef(new Map<string, boolean>())
+  const initializedSessionRef = useRef(false)
 
   const refreshSources = async () => {
     const response = await api.listIngestions()
@@ -43,6 +49,47 @@ export default function App() {
   useEffect(() => {
     void refreshSources()
   }, [])
+
+  useEffect(() => {
+    if (initializedSessionRef.current) return
+    initializedSessionRef.current = true
+    void api.createConversation().then((value) => {
+      const session = { id: value.conversation_id, title: 'New analysis', turns: [], running: false }
+      setSessions([session])
+      setActiveSessionId(session.id)
+    })
+  }, [])
+
+  const createSession = async () => {
+    if (creatingSession) return
+    setCreatingSession(true)
+    try {
+      const value = await api.createConversation()
+      const session = { id: value.conversation_id, title: 'New analysis', turns: [], running: false }
+      setSessions((current) => [...current, session])
+      setActiveSessionId(session.id)
+      setPage('analyze')
+    } finally {
+      setCreatingSession(false)
+    }
+  }
+
+  const setRunning = (sessionId: string, running: boolean) => {
+    runningRefs.current.set(sessionId, running)
+    setSessions((current) => current.map((session) => session.id === sessionId ? { ...session, running } : session))
+  }
+
+  const ask = (sessionId: string, value: string) => {
+    const question = value.trim()
+    if (!question || runningRefs.current.get(sessionId)) return
+    runningRefs.current.set(sessionId, true)
+    setSessions((current) => current.map((session) => session.id === sessionId ? {
+      ...session,
+      title: session.turns.length ? session.title : question.slice(0, 38),
+      turns: [...session.turns, question],
+      running: true,
+    } : session))
+  }
 
   const openReview = (batchId: string) => {
     setSelectedBatch(batchId)
@@ -57,9 +104,22 @@ export default function App() {
           {navigation.map((item) => {
             const Icon = item.icon
             return (
-              <button key={item.id} className={page === item.id ? 'nav-item active' : 'nav-item'} onClick={() => setPage(item.id)}>
-                <Icon size={18} /><span>{item.label}</span>
-              </button>
+              <div className="nav-group" key={item.id}>
+                <button className={page === item.id ? 'nav-item active' : 'nav-item'} onClick={() => setPage(item.id)}>
+                  <Icon size={18} /><span>{item.label}</span>
+                </button>
+                {item.id === 'analyze' && page === 'analyze' && <section className="conversation-subnav" aria-label="Analysis conversations">
+                  <div className="conversation-subnav-head"><span>Conversations</span><button onClick={() => void createSession()} disabled={creatingSession} aria-label="New conversation" title="New conversation"><Plus size={14} /></button></div>
+                  <div className="conversation-subtabs">
+                    {sessions.map((session, index) => <button key={session.id} className={activeSessionId === session.id ? 'active' : ''} onClick={() => setActiveSessionId(session.id)}>
+                      <span className={session.running ? 'session-state running' : 'session-state'} />
+                      <strong>{session.title}</strong>
+                      <small>{session.running ? 'Running' : session.turns.length ? `${session.turns.length} question${session.turns.length === 1 ? '' : 's'}` : `Conversation ${index + 1}`}</small>
+                    </button>)}
+                    {!sessions.length && <span className="conversation-subnav-empty">Preparing conversation…</span>}
+                  </div>
+                </section>}
+              </div>
             )
           })}
         </nav>
@@ -78,7 +138,7 @@ export default function App() {
 
         {page === 'sources' && <SourcesPage sources={sources} refresh={refreshSources} openReview={openReview} />}
         {page === 'schema' && <SchemaPage sources={sources} batchId={selectedBatch} onCommitted={refreshSources} onAnalyze={() => setPage('analyze')} />}
-        <div hidden={page !== 'analyze'}><AnalyzePage /></div>
+        <div hidden={page !== 'analyze'}><AnalyzePage sessions={sessions} activeSessionId={activeSessionId} ask={ask} setRunning={setRunning} /></div>
       </main>
     </div>
   )
@@ -191,64 +251,15 @@ function SchemaPage({ sources, batchId, onCommitted, onAnalyze }: { sources: Ing
   </div>
 }
 
-function AnalyzePage() {
-  type Session = { id: string; title: string; turns: string[]; running: boolean }
-  const [sessions, setSessions] = useState<Session[]>([])
-  const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
-  const [creatingSession, setCreatingSession] = useState(false)
-  const runningRefs = useRef(new Map<string, boolean>())
-  const initializedRef = useRef(false)
+function AnalyzePage({ sessions, activeSessionId, ask, setRunning }: { sessions: Session[]; activeSessionId: string | null; ask: (sessionId: string, question: string) => void; setRunning: (sessionId: string, running: boolean) => void }) {
   const suggestions = useMemo(() => [
     'Compare cost, pass rate and turnaround time by vendor',
     'What cost trends or anomalies appeared in recent months?',
     'Which materials have the highest failure rate?',
   ], [])
-  useEffect(() => {
-    if (initializedRef.current) return
-    initializedRef.current = true
-    void api.createConversation().then((value) => {
-      const session = { id: value.conversation_id, title: 'New analysis', turns: [], running: false }
-      setSessions([session])
-      setActiveSessionId(session.id)
-    })
-  }, [])
-
-  const createSession = async () => {
-    if (creatingSession) return
-    setCreatingSession(true)
-    try {
-      const value = await api.createConversation()
-      const session = { id: value.conversation_id, title: 'New analysis', turns: [], running: false }
-      setSessions((current) => [...current, session])
-      setActiveSessionId(session.id)
-    } finally {
-      setCreatingSession(false)
-    }
-  }
-
-  const setRunning = (sessionId: string, running: boolean) => {
-    runningRefs.current.set(sessionId, running)
-    setSessions((current) => current.map((session) => session.id === sessionId ? { ...session, running } : session))
-  }
-
-  const ask = (sessionId: string, value: string) => {
-    const question = value.trim()
-    if (!question || runningRefs.current.get(sessionId)) return
-    runningRefs.current.set(sessionId, true)
-    setSessions((current) => current.map((session) => session.id === sessionId ? {
-      ...session,
-      title: session.turns.length ? session.title : question.slice(0, 38),
-      turns: [...session.turns, question],
-      running: true,
-    } : session))
-  }
 
   return <div className="page analyze-page">
     <section className="analyze-hero"><div><span className="eyebrow">ASK & ANALYZE</span><h1>What would you like to understand?</h1><p>Ask across every trusted source. Prism will show its work, use the right tools, and surface the decision—not just the numbers.</p></div></section>
-    <section className="session-switcher" aria-label="Analysis conversations">
-      <div className="session-tabs">{sessions.map((session, index) => <button key={session.id} className={activeSessionId === session.id ? 'active' : ''} onClick={() => setActiveSessionId(session.id)}><span className={session.running ? 'session-state running' : 'session-state'} /> <strong>{session.title}</strong><small>{session.running ? 'Running' : session.turns.length ? `${session.turns.length} question${session.turns.length === 1 ? '' : 's'}` : `Conversation ${index + 1}`}</small></button>)}</div>
-      <button className="new-session-button" onClick={() => void createSession()} disabled={creatingSession}><Plus size={15} />{creatingSession ? 'Creating…' : 'New conversation'}</button>
-    </section>
     {sessions.map((session) => <section className="session-workspace" key={session.id} hidden={activeSessionId !== session.id}>
       {!session.turns.length && <div className="suggestion-grid">{suggestions.map((item, index) => <button key={item} onClick={() => ask(session.id, item)}><span className={`suggestion-icon s${index}`}><LayoutDashboard size={18} /></span><strong>{['Compare vendor performance','Find recent anomalies','Inspect quality risk'][index]}</strong><small>{item}</small><ArrowRight size={16} /></button>)}</div>}
       {session.turns.map((turn, index) => <div className="conversation" key={`${index}-${turn}`}><div className="user-message">{turn}</div><A2UIConversation conversationId={session.id} question={turn} onStreamingChange={index === session.turns.length - 1 ? (running) => setRunning(session.id, running) : undefined} /></div>)}
