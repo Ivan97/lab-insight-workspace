@@ -16,11 +16,11 @@ test:
 
 dev:
 	@./runtime/node_modules/.bin/mcp-server-chart --transport streamable & chart_pid=$$!; \
-	  uv run uvicorn backend.app.main:app --reload --host 127.0.0.1 --port 8000 & api_pid=$$!; \
+	  uv run uvicorn backend.app.main:app --reload --host 0.0.0.0 --port 8000 & api_pid=$$!; \
 	  trap 'kill $$chart_pid $$api_pid 2>/dev/null || true' INT TERM EXIT; \
-	  npm --prefix frontend run dev -- --host 127.0.0.1
+	  npm --prefix frontend run dev -- --host 0.0.0.0
 
 demo: build
 	@./runtime/node_modules/.bin/mcp-server-chart --transport streamable & chart_pid=$$!; \
 	  trap 'kill $$chart_pid 2>/dev/null || true' INT TERM EXIT; \
-	  uv run uvicorn backend.app.main:app --host 127.0.0.1 --port 8000
+	  uv run uvicorn backend.app.main:app --host 0.0.0.0 --port 8000
