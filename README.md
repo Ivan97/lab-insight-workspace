@@ -25,6 +25,8 @@ The Vite product is then available at [http://127.0.0.1:5173](http://127.0.0.1:5
 
 Copy `.env.example` to `.env` and fill in the OpenAI-compatible provider URL, API key and model. The backend loads this file automatically. Both Text-to-SQL planning and the final evidence-based answer use the configured model; missing or failed model calls are shown as explicit errors and never replaced by mock answers. SQLGlot validation, DuckDB execution and tool execution remain controlled by the application.
 
+`LLM_THINKING_MODEL` and `LLM_NON_THINKING_MODEL` can select different models for the composer toggle. For DeepSeek V4, both may use the same model: the backend sends the provider-native `thinking.type=enabled/disabled` parameter for Text-to-SQL, visualization tool selection and final answer generation.
+
 ## Verification
 
 ```bash

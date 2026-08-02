@@ -374,7 +374,10 @@ components:
       required: [question, a2uiClientCapabilities]
       properties:
         question: {type: string, minLength: 1, maxLength: 1000}
-        reasoningEnabled: {type: boolean, default: true}
+        reasoningEnabled:
+          type: boolean
+          default: true
+          description: Controls provider-native thinking for planning, visualization tool selection, and final answer generation.
         filters: {type: object}
         a2uiClientCapabilities:
           type: object

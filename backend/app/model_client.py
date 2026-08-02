@@ -7,6 +7,7 @@ from typing import Any
 import httpx
 
 from .config import ROOT_DIR  # noqa: F401 - importing config loads local runtime settings.
+from .model_runtime import apply_thinking_mode
 from .text_to_sql import ModelConfigurationError, ModelRequestError
 
 ANSWER_SYSTEM_PROMPT = """You are a careful internal data analyst.
@@ -44,29 +45,31 @@ class OpenAICompatibleModel:
     def __init__(self) -> None:
         self.base_url = os.getenv("LLM_BASE_URL", "").rstrip("/")
         self.api_key = os.getenv("LLM_API_KEY", "")
-        self.model = os.getenv("LLM_MODEL", "deepseek-reasoner")
+        self.model = os.getenv("LLM_MODEL", "deepseek-v4-flash")
 
     @property
     def configured(self) -> bool:
         return bool(self.base_url and self.api_key and self.model)
 
     async def stream_answer(
-        self, question: str, analysis: dict[str, Any]
+        self,
+        question: str,
+        analysis: dict[str, Any],
+        thinking_enabled: bool = True,
     ) -> AsyncIterator[dict[str, str]]:
         if not self.configured:
             raise ModelConfigurationError(
                 "LLM is not configured. Set LLM_BASE_URL, LLM_API_KEY and LLM_MODEL."
             )
         prompt = f"Question: {question}\nAnalysis JSON: {json.dumps(analysis, ensure_ascii=False, default=str)}"
-        payload = {
-            "model": self.model,
+        payload = apply_thinking_mode({
             "stream": True,
             "temperature": 0.1,
             "messages": [
                 {"role": "system", "content": ANSWER_SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ],
-        }
+        }, thinking_enabled)
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
         url = f"{self.base_url}/chat/completions"
         try:
@@ -98,13 +101,13 @@ class OpenAICompatibleModel:
         context: dict[str, Any],
         tools: list[dict[str, Any]],
         reasoning_sink: Callable[[str], None] | None = None,
+        thinking_enabled: bool = True,
     ) -> ModelToolCall | None:
         if not self.configured:
             raise ModelConfigurationError(
                 "LLM is not configured. Set LLM_BASE_URL, LLM_API_KEY and LLM_MODEL."
             )
-        payload = {
-            "model": self.model,
+        payload = apply_thinking_mode({
             "stream": True,
             "temperature": 0,
             "messages": [
@@ -116,7 +119,7 @@ class OpenAICompatibleModel:
             ],
             "tools": tools,
             "tool_choice": "auto",
-        }
+        }, thinking_enabled)
         calls: dict[int, dict[str, str]] = {}
         try:
             async with (

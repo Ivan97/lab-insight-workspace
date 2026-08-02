@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 import httpx
 
 from .config import ROOT_DIR  # noqa: F401 - importing config loads local runtime settings.
+from .model_runtime import apply_thinking_mode
 from .semantic import semantic_prompt_context
 
 SYSTEM_PROMPT = """You are the Text-to-SQL planner for an internal laboratory analytics product.
@@ -84,13 +85,14 @@ class TextToSQLPlanner:
     def __init__(self) -> None:
         self.base_url = os.getenv("LLM_BASE_URL", "").rstrip("/")
         self.api_key = os.getenv("LLM_API_KEY", "")
-        self.model = os.getenv("LLM_MODEL", "deepseek-reasoner")
+        self.model = os.getenv("LLM_MODEL", "deepseek-v4-flash")
 
     def generate(
         self,
         question: str,
         repair_context: str | None = None,
         reasoning_sink: Callable[[str], None] | None = None,
+        thinking_enabled: bool = True,
     ) -> GeneratedPlan:
         if not self.base_url or not self.api_key or not self.model:
             raise ModelConfigurationError(
@@ -99,15 +101,14 @@ class TextToSQLPlanner:
         user_prompt = f"User question: {question}"
         if repair_context:
             user_prompt += f"\nThe previous SQL was rejected. Repair it using this error: {repair_context}"
-        payload = {
-            "model": self.model,
+        payload = apply_thinking_mode({
             "stream": True,
             "temperature": 0,
             "messages": [
                 {"role": "system", "content": f"{SYSTEM_PROMPT}\n\n{semantic_prompt_context()}"},
                 {"role": "user", "content": user_prompt},
             ],
-        }
+        }, thinking_enabled)
         try:
             with httpx.Client(timeout=35, trust_env=False) as client, client.stream(
                 "POST",

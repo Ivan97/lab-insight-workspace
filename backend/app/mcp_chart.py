@@ -24,6 +24,7 @@ class AntVChartClient:
         question: str,
         analysis: dict[str, Any],
         event_sink: ChartEventSink | None = None,
+        thinking_enabled: bool = True,
     ) -> dict[str, Any]:
         visualization = analysis["visualization"]
         discovery_id = "mcp:tools/list"
@@ -67,9 +68,12 @@ class AntVChartClient:
                         "query_result": analysis["table"],
                     },
                     model_tools,
-                    reasoning_sink=lambda delta: self._emit(
-                        event_sink, {"type": "reasoning_delta", "delta": delta}
-                    ),
+                    reasoning_sink=(
+                        lambda delta: self._emit(
+                            event_sink, {"type": "reasoning_delta", "delta": delta}
+                        )
+                    ) if thinking_enabled else None,
+                    thinking_enabled=thinking_enabled,
                 )
                 if selected is None:
                     return {**visualization, "status": "SKIPPED", "asset_url": None}

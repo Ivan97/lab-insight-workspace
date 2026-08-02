@@ -96,6 +96,7 @@ class A2UIStream:
                 self.question,
                 receive_analysis_event,
                 self.cancellation_token,
+                self.reasoning_enabled,
             )
         )
         try:
@@ -144,7 +145,12 @@ class A2UIStream:
                 chart_queue.put_nowait(event)
 
             chart_task = asyncio.create_task(
-                chart_client.render(self.question, analysis, receive_chart_event)
+                chart_client.render(
+                    self.question,
+                    analysis,
+                    receive_chart_event,
+                    self.reasoning_enabled,
+                )
             )
             try:
                 while not chart_task.done() or not chart_queue.empty():
@@ -187,7 +193,7 @@ class A2UIStream:
         else:
             try:
                 async for model_event in OpenAICompatibleModel().stream_answer(
-                    self.question, analysis
+                    self.question, analysis, self.reasoning_enabled
                 ):
                     if self._is_cancelled():
                         yield self._sse(self._update("/status", "CANCELLED"))

@@ -18,6 +18,7 @@ from backend.app.model_client import (
     VISUALIZATION_SYSTEM_PROMPT,
     OpenAICompatibleModel,
 )
+from backend.app.model_runtime import apply_thinking_mode
 from backend.app.semantic import semantic_prompt_context
 from backend.app.sql_guard import SQLGuardError, guard_sql
 from backend.app.text_to_sql import SYSTEM_PROMPT, GeneratedPlan, ModelConfigurationError
@@ -165,6 +166,32 @@ def test_visualization_mcp_uses_on_demand_npx_stdio(client: TestClient):
     }
 
 
+def test_deepseek_thinking_mode_changes_provider_payload(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "deepseek")
+    monkeypatch.setenv("LLM_THINKING_MODEL", "deepseek-v4-pro")
+    monkeypatch.setenv("LLM_NON_THINKING_MODEL", "deepseek-v4-flash")
+    monkeypatch.setenv("LLM_REASONING_EFFORT", "max")
+
+    thinking = apply_thinking_mode({"stream": True}, True)
+    assert thinking["model"] == "deepseek-v4-pro"
+    assert thinking["thinking"] == {"type": "enabled"}
+    assert thinking["reasoning_effort"] == "max"
+
+    direct = apply_thinking_mode({"stream": True}, False)
+    assert direct["model"] == "deepseek-v4-flash"
+    assert direct["thinking"] == {"type": "disabled"}
+    assert "reasoning_effort" not in direct
+
+
+def test_other_openai_compatible_providers_switch_models_without_deepseek_fields(
+    monkeypatch,
+):
+    monkeypatch.setenv("LLM_PROVIDER", "kimi")
+    monkeypatch.setenv("LLM_NON_THINKING_MODEL", "kimi-direct")
+    payload = apply_thinking_mode({}, False)
+    assert payload == {"model": "kimi-direct"}
+
+
 def test_reference_tables_support_contract_and_budget_analysis(client: TestClient):
     with connection() as conn:
         contract_rows = conn.execute("SELECT count(*) FROM dim_vendor_contracts").fetchone()[0]
@@ -255,7 +282,12 @@ def test_agent_events_preserve_interleaved_order():
 async def test_stream_is_ordered_and_completes(
     monkeypatch, reasoning_enabled, expected_event_types
 ):
-    async def fake_render(self, question, analysis, event_sink):
+    observed_modes = []
+
+    async def fake_render(
+        self, question, analysis, event_sink, thinking_enabled
+    ):
+        observed_modes.append(thinking_enabled)
         event_sink({
             "type": "tool_call", "tool_call_id": "model:chart",
             "name": "AntV MCP · generate_column_chart", "status": "RUNNING",
@@ -273,7 +305,10 @@ async def test_stream_is_ordered_and_completes(
         }
 
     monkeypatch.setattr("backend.app.a2ui.AntVChartClient.render", fake_render)
-    def fake_analysis(_question, event_sink, _cancellation_token):
+    def fake_analysis(
+        _question, event_sink, _cancellation_token, thinking_enabled
+    ):
+        observed_modes.append(thinking_enabled)
         event_sink({"type": "reasoning_delta", "delta": "按供应商聚合测试数量。"})
         event_sink({
             "type": "tool_result", "tool_call_id": "duckdb_query:1",
@@ -293,7 +328,8 @@ async def test_stream_is_ordered_and_completes(
 
     monkeypatch.setattr("backend.app.a2ui.run_analysis", fake_analysis)
 
-    async def fake_answer(self, question, analysis):
+    async def fake_answer(self, question, analysis, thinking_enabled):
+        observed_modes.append(thinking_enabled)
         yield {"type": "content_delta", "delta": "A has 2 tests."}
 
     monkeypatch.setattr("backend.app.a2ui.OpenAICompatibleModel.stream_answer", fake_answer)
@@ -332,6 +368,7 @@ async def test_stream_is_ordered_and_completes(
     assert history["total"] == 2
     assert history["items"][-1]["status"] == "COMPLETED"
     assert history["items"][-1]["a2ui_surface_snapshot"]["status"] == "COMPLETED"
+    assert observed_modes == [reasoning_enabled, reasoning_enabled, reasoning_enabled]
 
 
 def test_cancel_streaming_message(client: TestClient):
