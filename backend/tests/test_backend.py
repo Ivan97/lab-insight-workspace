@@ -161,9 +161,13 @@ def test_llm_plan_executes_guarded_query(monkeypatch):
         y_field="total_cost",
         rationale="Compare project totals.",
         formats={"project": "TEXT", "total_cost": "CURRENCY_USD"},
-        reasoning_summary=("按项目聚合测试成本，并按总成本降序比较。",),
     )
-    monkeypatch.setattr("backend.app.analysis.TextToSQLPlanner.generate", lambda *_args, **_kwargs: plan)
+
+    def fake_generate(*_args, **kwargs):
+        kwargs["reasoning_sink"]("provider-native reasoning chunk")
+        return plan
+
+    monkeypatch.setattr("backend.app.analysis.TextToSQLPlanner.generate", fake_generate)
     events = []
     analysis = run_analysis("Which projects cost the most?", events.append)
     assert analysis["table"]["rows"]
@@ -173,8 +177,8 @@ def test_llm_plan_executes_guarded_query(monkeypatch):
     totals = [row["total_cost"] for row in analysis["table"]["rows"]]
     assert all(value == round(value, 2) for value in totals)
     assert events[0] == {
-        "type": "reasoning",
-        "text": "按项目聚合测试成本，并按总成本降序比较。",
+        "type": "reasoning_delta",
+        "delta": "provider-native reasoning chunk",
     }
     completed_tools = [
         event
@@ -232,7 +236,7 @@ async def test_stream_is_ordered_and_completes(monkeypatch):
 
     monkeypatch.setattr("backend.app.a2ui.AntVChartClient.render", fake_render)
     def fake_analysis(_question, event_sink):
-        event_sink({"type": "reasoning", "text": "按供应商聚合测试数量。"})
+        event_sink({"type": "reasoning_delta", "delta": "按供应商聚合测试数量。"})
         event_sink({
             "type": "tool_result", "tool_call_id": "duckdb_query:1",
             "name": "DuckDB · execute_query", "status": "COMPLETED",
@@ -252,7 +256,7 @@ async def test_stream_is_ordered_and_completes(monkeypatch):
     monkeypatch.setattr("backend.app.a2ui.run_analysis", fake_analysis)
 
     async def fake_answer(self, question, analysis):
-        yield "A has 2 tests."
+        yield {"type": "content_delta", "delta": "A has 2 tests."}
 
     monkeypatch.setattr("backend.app.a2ui.OpenAICompatibleModel.stream_answer", fake_answer)
     with TestClient(app) as client:

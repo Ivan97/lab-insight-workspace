@@ -33,6 +33,7 @@ function ReasoningView({ segments, status }: { segments: ReasoningSegment[]; sta
   const [expanded, setExpanded] = useState(false)
   const [manuallyExpanded, setManuallyExpanded] = useState(false)
   const previousStatus = useRef(status)
+  const contentRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     if (status === 'RUNNING' && previousStatus.current !== 'RUNNING') setExpanded(true)
@@ -43,6 +44,12 @@ function ReasoningView({ segments, status }: { segments: ReasoningSegment[]; sta
     previousStatus.current = status
   }, [status, manuallyExpanded])
 
+  useEffect(() => {
+    if (status === 'RUNNING' && contentRef.current) {
+      contentRef.current.scrollTop = contentRef.current.scrollHeight
+    }
+  }, [segments, status])
+
   if (!segments.length) return null
   return <section className={`reasoning-panel ${expanded ? 'expanded' : ''}`}>
     <button className="reasoning-summary" onClick={() => { setExpanded((value) => !value); setManuallyExpanded(!expanded) }}>
@@ -50,7 +57,7 @@ function ReasoningView({ segments, status }: { segments: ReasoningSegment[]; sta
       <span className="reasoning-meta">{status === 'COMPLETED' ? '已完成' : status === 'CANCELLED' ? '已停止' : '正在分析'} · {segments.length} 步</span>
       <ChevronDown size={15} />
     </button>
-    <div className="reasoning-content">{segments.map((segment) => <p key={segment.id}>{segment.text}</p>)}</div>
+    <div className="reasoning-content" ref={contentRef}>{segments.map((segment) => <p key={segment.id}>{segment.text}</p>)}</div>
   </section>
 }
 

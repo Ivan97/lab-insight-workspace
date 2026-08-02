@@ -1,6 +1,7 @@
 import json
 import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import ClassVar
 
@@ -57,11 +58,6 @@ Rules:
 - x_field and y_field must exactly match selected SQL aliases.
 - Use a line chart for ordered time, a bar chart for long category labels, otherwise a column chart.
 - If the message is not an analytical data question, set clarification to a short helpful question and sql to null.
-- reasoning_summary must contain 1-3 short, user-visible progress summaries grounded in the
-  actual plan you produced. Describe the selected data scope, metric interpretation, and intended
-  operation. Do not reveal private chain-of-thought, fabricate completed work, or use generic
-  boilerplate such as "thinking about the question". Use the same language as the user's question.
-
 Required JSON shape:
 {
   "intent": "short_snake_case",
@@ -72,8 +68,7 @@ Required JSON shape:
   "y_field": "selected_numeric_alias",
   "formats": {"selected_alias": "TEXT", "selected_numeric_alias": "DECIMAL_2"},
   "rationale": "one sentence",
-  "clarification": null or "short clarification",
-  "reasoning_summary": ["concise visible planning update"]
+  "clarification": null or "short clarification"
 }
 """
 
@@ -97,7 +92,6 @@ class GeneratedPlan:
     rationale: str
     clarification: str | None = None
     formats: dict[str, str] = field(default_factory=dict)
-    reasoning_summary: tuple[str, ...] = ()
 
 
 class TextToSQLPlanner:
@@ -110,9 +104,14 @@ class TextToSQLPlanner:
     def __init__(self) -> None:
         self.base_url = os.getenv("LLM_BASE_URL", "").rstrip("/")
         self.api_key = os.getenv("LLM_API_KEY", "")
-        self.model = os.getenv("LLM_MODEL", "deepseek-chat")
+        self.model = os.getenv("LLM_MODEL", "deepseek-reasoner")
 
-    def generate(self, question: str, repair_context: str | None = None) -> GeneratedPlan:
+    def generate(
+        self,
+        question: str,
+        repair_context: str | None = None,
+        reasoning_sink: Callable[[str], None] | None = None,
+    ) -> GeneratedPlan:
         if not self.base_url or not self.api_key or not self.model:
             raise ModelConfigurationError(
                 "LLM is not configured. Set LLM_BASE_URL, LLM_API_KEY and LLM_MODEL."
@@ -122,7 +121,7 @@ class TextToSQLPlanner:
             user_prompt += f"\nThe previous SQL was rejected. Repair it using this error: {repair_context}"
         payload = {
             "model": self.model,
-            "stream": False,
+            "stream": True,
             "temperature": 0,
             "messages": [
                 {"role": "system", "content": f"{SYSTEM_PROMPT}\n\n{semantic_prompt_context()}"},
@@ -130,17 +129,33 @@ class TextToSQLPlanner:
             ],
         }
         try:
-            with httpx.Client(timeout=35, trust_env=False) as client:
-                response = client.post(
-                    f"{self.base_url}/chat/completions",
-                    json=payload,
-                    headers={
-                        "Authorization": f"Bearer {self.api_key}",
-                        "Content-Type": "application/json",
-                    },
-                )
-            response.raise_for_status()
-            content = response.json()["choices"][0]["message"]["content"]
+            with httpx.Client(timeout=35, trust_env=False) as client, client.stream(
+                "POST",
+                f"{self.base_url}/chat/completions",
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+            ) as response:
+                response.raise_for_status()
+                content_parts: list[str] = []
+                for line in response.iter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if not data or data == "[DONE]":
+                        continue
+                    delta = json.loads(data)["choices"][0].get("delta", {})
+                    reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+                    if reasoning and reasoning_sink:
+                        reasoning_sink(str(reasoning))
+                    content = delta.get("content")
+                    if content:
+                        content_parts.append(str(content))
+            content = "".join(content_parts)
+            if not content:
+                raise ValueError("Planner model returned no content")
             plan = self._parse_plan(content)
         except (httpx.HTTPError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise ModelRequestError(f"Text-to-SQL model request failed: {type(exc).__name__}") from exc
@@ -152,10 +167,7 @@ class TextToSQLPlanner:
     def _parse_plan(content: str) -> GeneratedPlan:
         cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip(), flags=re.IGNORECASE)
         payload = json.loads(cleaned)
-        required = {
-            "intent", "title", "tool_name", "x_field", "y_field", "formats", "rationale",
-            "reasoning_summary",
-        }
+        required = {"intent", "title", "tool_name", "x_field", "y_field", "formats", "rationale"}
         if not required.issubset(payload):
             raise ValueError("Planner response is missing required fields")
         sql = payload.get("sql")
@@ -170,13 +182,6 @@ class TextToSQLPlanner:
             raise ValueError("Planner response contains invalid result formats")
         if sql and (str(payload["x_field"]) not in formats or str(payload["y_field"]) not in formats):
             raise ValueError("Planner response is missing chart field formats")
-        reasoning_summary = payload.get("reasoning_summary")
-        if (
-            not isinstance(reasoning_summary, list)
-            or not 1 <= len(reasoning_summary) <= 3
-            or any(not isinstance(item, str) or not item.strip() for item in reasoning_summary)
-        ):
-            raise ValueError("Planner response requires 1-3 visible reasoning summaries")
         return GeneratedPlan(
             intent=str(payload["intent"]),
             sql=str(sql) if sql else None,
@@ -187,5 +192,4 @@ class TextToSQLPlanner:
             rationale=str(payload["rationale"]),
             clarification=str(clarification) if clarification else None,
             formats={str(key): str(value) for key, value in formats.items()},
-            reasoning_summary=tuple(item.strip() for item in reasoning_summary),
         )

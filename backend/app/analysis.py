@@ -140,18 +140,19 @@ def run_analysis(
     question: str, event_sink: AnalysisEventSink | None = None
 ) -> dict[str, Any]:
     planner = TextToSQLPlanner()
-    plan = planner.generate(question)
-    for summary in plan.reasoning_summary:
-        _emit(event_sink, {"type": "reasoning", "text": summary})
+    reasoning_sink = lambda chunk: _emit(
+        event_sink, {"type": "reasoning_delta", "delta": chunk}
+    )
+    plan = planner.generate(question, reasoning_sink=reasoning_sink)
     if plan.clarification:
         return _empty_analysis(plan.clarification)
 
     try:
         guarded_sql, rows = _execute_plan(plan, event_sink, attempt=1)
     except (SQLGuardError, duckdb.Error, ValueError) as exc:
-        plan = planner.generate(question, repair_context=str(exc))
-        for summary in plan.reasoning_summary:
-            _emit(event_sink, {"type": "reasoning", "text": summary})
+        plan = planner.generate(
+            question, repair_context=str(exc), reasoning_sink=reasoning_sink
+        )
         if plan.clarification:
             return _empty_analysis(plan.clarification)
         guarded_sql, rows = _execute_plan(plan, event_sink, attempt=2)

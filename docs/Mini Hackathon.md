@@ -1337,7 +1337,7 @@ DeepSeek 和 Kimi 通过 OpenAI-compatible API 接入。模型调用层不直接
 - `generate_tool_call(context, tool_schemas)`
 - 可选的 `extract_from_image(...)`
 
-Schema Mapping 和 Text-to-SQL 都要求结构化输出，并在应用侧做 Schema 校验和失败重试。`stream(...)` 将不同 Provider 的可见思考摘要、正文、工具请求和完成状态归一化为内部领域事件，再由 `A2UIAdapter` 转为标准 A2UI 消息；Provider 隐藏的 Chain-of-Thought 不采集、不持久化、不对外展示。Visualization Agent 使用 `generate_tool_call(...)` 从 MCP 动态工具 Schema 中选择工具；模型只产生 Tool Call，实际 MCP 连接、调用、超时和资源下载始终由后端执行。模型 Provider 原生 Tool Calling 格式的差异由 `ModelClient` 适配层屏蔽。
+Schema Mapping 和 Text-to-SQL 都要求结构化输出，并在应用侧做 Schema 校验和失败重试。`stream(...)` 只透传 Provider API 明确返回的 `reasoning_content`（或等价原生 reasoning delta）、正文、工具请求和完成状态，再由 `A2UIAdapter` 转为标准 A2UI 消息；模型未返回 reasoning 字段时不展示思考模块，应用不得生成、补写或推断思考文案。Provider 未暴露的隐藏 Chain-of-Thought 不采集、不持久化。Visualization Agent 使用 `generate_tool_call(...)` 从 MCP 动态工具 Schema 中选择工具；模型只产生 Tool Call，实际 MCP 连接、调用、超时和资源下载始终由后端执行。模型 Provider 原生 Tool Calling 格式的差异由 `ModelClient` 适配层屏蔽。
 
 ### 13.2 上线后迁移 Gemini
 

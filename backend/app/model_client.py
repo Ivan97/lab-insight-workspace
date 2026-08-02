@@ -27,13 +27,15 @@ class OpenAICompatibleModel:
     def __init__(self) -> None:
         self.base_url = os.getenv("LLM_BASE_URL", "").rstrip("/")
         self.api_key = os.getenv("LLM_API_KEY", "")
-        self.model = os.getenv("LLM_MODEL", "deepseek-chat")
+        self.model = os.getenv("LLM_MODEL", "deepseek-reasoner")
 
     @property
     def configured(self) -> bool:
         return bool(self.base_url and self.api_key and self.model)
 
-    async def stream_answer(self, question: str, analysis: dict[str, Any]) -> AsyncIterator[str]:
+    async def stream_answer(
+        self, question: str, analysis: dict[str, Any]
+    ) -> AsyncIterator[dict[str, str]]:
         if not self.configured:
             raise ModelConfigurationError(
                 "LLM is not configured. Set LLM_BASE_URL, LLM_API_KEY and LLM_MODEL."
@@ -50,7 +52,6 @@ class OpenAICompatibleModel:
         }
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
         url = f"{self.base_url}/chat/completions"
-        emitted = False
         try:
             async with (
                 httpx.AsyncClient(timeout=35, trust_env=False) as client,
@@ -64,12 +65,13 @@ class OpenAICompatibleModel:
                     if not data or data == "[DONE]":
                         continue
                     delta = json.loads(data)["choices"][0].get("delta", {})
+                    reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+                    if reasoning:
+                        yield {"type": "reasoning_delta", "delta": str(reasoning)}
                     content = delta.get("content")
                     if content:
-                        emitted = True
-                        yield content
+                        yield {"type": "content_delta", "delta": str(content)}
         except (httpx.HTTPError, KeyError, ValueError, json.JSONDecodeError) as exc:
-            if not emitted:
-                raise ModelRequestError(
-                    f"Answer model request failed: {type(exc).__name__}"
-                ) from exc
+            raise ModelRequestError(
+                f"Answer model request failed: {type(exc).__name__}"
+            ) from exc

@@ -91,8 +91,10 @@ class A2UIStream:
                     event = await asyncio.wait_for(event_queue.get(), timeout=0.05)
                 except TimeoutError:
                     continue
-                if event["type"] == "reasoning":
-                    yield self._sse(self._update_reasoning(event["text"], "RUNNING"))
+                if event["type"] == "reasoning_delta":
+                    yield self._sse(
+                        self._update_reasoning_delta(event["delta"], "RUNNING")
+                    )
                     continue
                 if event["type"] in {"tool_call", "tool_result"}:
                     tool_call_id = event["tool_call_id"]
@@ -157,10 +159,18 @@ class A2UIStream:
             yield self._sse(self._update_content(markdown))
         else:
             try:
-                async for chunk in OpenAICompatibleModel().stream_answer(self.question, analysis):
+                async for model_event in OpenAICompatibleModel().stream_answer(
+                    self.question, analysis
+                ):
                     if self._is_cancelled():
                         yield self._sse(self._update("/status", "CANCELLED"))
                         return
+                    if model_event["type"] == "reasoning_delta":
+                        yield self._sse(
+                            self._update_reasoning_delta(model_event["delta"], "RUNNING")
+                        )
+                        continue
+                    chunk = model_event["delta"]
                     markdown += chunk
                     self.model["content"]["markdown"] = markdown
                     yield self._sse(self._update_content_delta(chunk))
@@ -194,6 +204,25 @@ class A2UIStream:
                 "id": str(uuid.uuid4()), "type": "reasoning",
                 "segments": [segment], "status": status,
             })
+        return self._update("/events", events)
+
+    def _update_reasoning_delta(self, delta: str, status: str) -> dict[str, Any]:
+        events = self.model["events"]
+        if events and events[-1]["type"] == "reasoning" and events[-1]["status"] == status:
+            segment = events[-1]["segments"][-1]
+            segment["text"] += delta
+        else:
+            segment = {
+                "id": str(uuid.uuid4()),
+                "text": delta,
+                "createdAt": datetime.now(UTC).isoformat(),
+            }
+            events.append({
+                "id": str(uuid.uuid4()), "type": "reasoning",
+                "segments": [segment], "status": status,
+            })
+            self.model["reasoning"]["segments"].append(segment)
+        self.model["reasoning"]["status"] = status
         return self._update("/events", events)
 
     def _update_tool(
