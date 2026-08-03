@@ -411,6 +411,9 @@ function RelationshipsPanel({ semantic, onPublished }: { semantic: SemanticLayer
   if (!semantic) return <section className="section-card relationship-loading">Loading relationships…</section>
   const table = (name: string) => semantic.tables.find((item) => item.name === name)
   const dimensionTables = semantic.tables.filter((item) => item.name !== semantic.base_table)
+  // A dimension supports a single join from the fact table, so the button has
+  // nothing to add once they are all used. Saying so beats a dead control.
+  const unjoined = dimensionTables.filter((item) => !rules.some((rule) => rule.right_table === item.name)).map((item) => item.name)
   const updateRule = (index: number, patch: Partial<JoinRuleInput>) => setRules((current) => current.map((rule, ruleIndex) => ruleIndex === index ? { ...rule, ...patch } : rule))
   const addRule = () => {
     const nextTable = dimensionTables.find((item) => !rules.some((rule) => rule.right_table === item.name)) ?? dimensionTables[0]
@@ -430,7 +433,7 @@ function RelationshipsPanel({ semantic, onPublished }: { semantic: SemanticLayer
       <div className="relationship-stats"><span><strong>{semantic.rules.length}</strong> relationships</span><span><strong>{semantic.view.column_count}</strong> fields</span><span className="status-badge ready"><CheckCircle2 size={13} /> Published</span></div>
     </section>
     <section className="section-card relationship-editor">
-      <div className="section-header"><div><h2>Join rules</h2><p>Define reviewed paths from the fact table to trusted dimensions. Keys are validated before publishing.</p></div><button className="secondary-button" onClick={addRule} disabled={rules.length >= dimensionTables.length}><Plus size={15} /> Add relationship</button></div>
+      <div className="section-header"><div><h2>Join rules</h2><p>Define reviewed paths from the fact table to trusted dimensions. Keys are validated before publishing.</p></div><div className="relationship-add">{unjoined.length === 0 && <small>Every dimension is already joined. Each one supports a single join from the fact table, so adding another relationship needs a new dimension entity.</small>}<button className="secondary-button" onClick={addRule} disabled={!unjoined.length} title={unjoined.length ? `Join ${unjoined[0]}` : 'No unjoined dimension remains'}><Plus size={15} /> Add relationship</button></div></div>
       <div className="relationship-list">
         {rules.map((rule, index) => {
           const published = semantic.rules.find((item) => item.right_table === rule.right_table && item.left_field === rule.left_field && item.right_field === rule.right_field)
