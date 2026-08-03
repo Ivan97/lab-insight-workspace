@@ -15,6 +15,7 @@ from .cancellation import cancel_active, register_cancellation, unregister_cance
 from .config import ARTIFACT_DIR, CATALOG_ID, DEMO_SOURCE_DIR, FRONTEND_DIST
 from .database import connection, init_schema, json_dumps, rows_as_dicts, utcnow
 from .demo_data import default_mappings, initialize_demo
+from .mcp_chart import prime_tool_cache
 from .mcp_config import config_path, load_servers
 from .profiling import preview_frame, profile_frame, profile_text
 from .schemas import (
@@ -40,6 +41,9 @@ async def lifespan(_: FastAPI):
     init_schema()
     initialize_demo()
     initialize_semantic_layer()
+    # Warms the MCP tool schemas so the first chart does not pay discovery, and
+    # so the model can pick a tool before any server is started. Never fatal.
+    app.state.mcp_discovery = await prime_tool_cache()
     yield
 
 
@@ -71,6 +75,7 @@ def health() -> dict:
         "visualization_mcp": {
             "status": "on-demand",
             "config_path": str(config_path()),
+            "discovery": getattr(app.state, "mcp_discovery", None),
             "servers": [server.describe() for server in load_servers()],
         },
     }

@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 from collections.abc import Callable
 from contextlib import AsyncExitStack
@@ -18,12 +19,18 @@ ChartEventSink = Callable[[dict[str, Any]], None]
 
 @dataclass(frozen=True)
 class DiscoveredTool:
-    """One tool, remembering which server can execute it."""
+    """One tool schema, remembering which server can execute it.
 
-    server: str
-    session: ClientSession
+    Deliberately holds no session. Schemas are static, so they are cached and
+    reused, which lets the model choose a tool before any server is started.
+    """
+
+    server: McpServer
     schema: dict[str, Any]
-    asset_hosts: tuple[str, ...]
+
+    @property
+    def asset_hosts(self) -> tuple[str, ...]:
+        return self.server.asset_hosts
 
 
 async def _open_session(stack: AsyncExitStack, server: McpServer) -> ClientSession:
@@ -45,6 +52,76 @@ async def _open_session(stack: AsyncExitStack, server: McpServer) -> ClientSessi
     session = await stack.enter_async_context(ClientSession(read, write))
     await session.initialize()
     return session
+
+
+_TOOL_CACHE: tuple[dict[str, DiscoveredTool], dict[str, Any]] | None = None
+_CACHE_LOCK = asyncio.Lock()
+
+
+async def discover_tools(
+    servers: list[McpServer],
+) -> tuple[dict[str, DiscoveredTool], dict[str, Any]]:
+    """Connect to each server once and collect its tool schemas."""
+    tools: dict[str, DiscoveredTool] = {}
+    report: dict[str, Any] = {}
+    for server in servers:
+        try:
+            async with AsyncExitStack() as stack:
+                session = await _open_session(stack, server)
+                discovered = await session.list_tools()
+                for tool in discovered.tools:
+                    if tool.name in tools:
+                        raise ValueError(
+                            f"Tool {tool.name!r} is exposed by both "
+                            f"{tools[tool.name].server.name!r} and {server.name!r}. "
+                            "Disable one of them in mcp.json."
+                        )
+                    tools[tool.name] = DiscoveredTool(
+                        server=server,
+                        schema={
+                            "type": "function",
+                            "function": {
+                                "name": tool.name,
+                                "description": tool.description or "",
+                                "parameters": tool.inputSchema,
+                            },
+                        },
+                    )
+                report[server.name] = {"tool_count": len(discovered.tools)}
+        except Exception as exc:  # noqa: BLE001 - one bad server must not hide the rest.
+            report[server.name] = {"error": f"{type(exc).__name__}: {exc}"}
+    return tools, report
+
+
+async def cached_tools(
+    servers: list[McpServer], refresh: bool = False
+) -> tuple[dict[str, DiscoveredTool], dict[str, Any], bool]:
+    """Tool schemas, discovered once per process.
+
+    Starting a stdio server costs seconds, so the schemas are cached and the
+    model picks a tool before anything is spawned. Returns whether the answer
+    came from cache.
+    """
+    global _TOOL_CACHE
+    async with _CACHE_LOCK:
+        if _TOOL_CACHE is not None and not refresh:
+            tools, report = _TOOL_CACHE
+            return tools, report, True
+        tools, report = await discover_tools(servers)
+        # A server that failed is not cached as empty: a transient npx failure
+        # would otherwise disable charts for the life of the process.
+        if tools:
+            _TOOL_CACHE = (tools, report)
+        return tools, report, False
+
+
+async def prime_tool_cache() -> dict[str, Any]:
+    """Warm the cache at startup. Never fatal: charts degrade, the app serves."""
+    try:
+        _, report, _ = await cached_tools(enabled_servers())
+        return report
+    except Exception as exc:  # noqa: BLE001 - startup must not depend on npx.
+        return {"error": f"{type(exc).__name__}: {exc}"}
 
 
 class McpVisualizationClient:
@@ -78,97 +155,69 @@ class McpVisualizationClient:
         selected_call_id: str | None = None
         selected_label = "MCP · tool call"
         try:
+            tools, per_server, from_cache = await cached_tools(self.servers)
+            self._emit(event_sink, {
+                "type": "tool_result", "tool_call_id": discovery_id,
+                "name": "MCP · tools/list", "status": "COMPLETED",
+                "arguments": {},
+                "result": {
+                    "tool_count": len(tools),
+                    "servers": per_server,
+                    "tools": list(tools),
+                    "cached": from_cache,
+                },
+            })
+            if not tools:
+                raise ValueError("No MCP server offered any tool")
+
+            # Chosen from cached schemas, so a question that needs no chart
+            # never starts a server at all.
+            selected = await OpenAICompatibleModel().select_visualization_tool(
+                {"question": question, "query_result": analysis["table"]},
+                [tool.schema for tool in tools.values()],
+                reasoning_sink=(
+                    lambda delta: self._emit(
+                        event_sink, {"type": "reasoning_delta", "delta": delta}
+                    )
+                ) if thinking_enabled else None,
+                thinking_enabled=thinking_enabled,
+            )
+            if selected is None:
+                return {**visualization, "status": "SKIPPED", "asset_url": None}
+            chosen = tools.get(selected.name)
+            if chosen is None:
+                raise ValueError("Visualization agent selected an undiscovered MCP tool")
+            selected_call_id = selected.tool_call_id
+            selected_label = f"{chosen.server.name} · {selected.name}"
+            self._emit(event_sink, {
+                "type": "tool_call", "tool_call_id": selected.tool_call_id,
+                "name": selected_label, "status": "RUNNING",
+                "arguments": selected.arguments,
+            })
+            # Only the server that owns the tool is started.
             async with AsyncExitStack() as stack:
-                tools: dict[str, DiscoveredTool] = {}
-                per_server: dict[str, Any] = {}
-                for server in self.servers:
-                    try:
-                        session = await _open_session(stack, server)
-                        discovered = await session.list_tools()
-                    except Exception as exc:  # noqa: BLE001 - one bad server must not hide the rest.
-                        per_server[server.name] = {"error": f"{type(exc).__name__}: {exc}"}
-                        continue
-                    for tool in discovered.tools:
-                        if tool.name in tools:
-                            raise ValueError(
-                                f"Tool {tool.name!r} is exposed by both "
-                                f"{tools[tool.name].server!r} and {server.name!r}. "
-                                "Disable one of them in mcp.json."
-                            )
-                        tools[tool.name] = DiscoveredTool(
-                            server=server.name,
-                            session=session,
-                            asset_hosts=server.asset_hosts,
-                            schema={
-                                "type": "function",
-                                "function": {
-                                    "name": tool.name,
-                                    "description": tool.description or "",
-                                    "parameters": tool.inputSchema,
-                                },
-                            },
-                        )
-                    per_server[server.name] = {"tool_count": len(discovered.tools)}
-
-                self._emit(event_sink, {
-                    "type": "tool_result", "tool_call_id": discovery_id,
-                    "name": "MCP · tools/list", "status": "COMPLETED",
-                    "arguments": {},
-                    "result": {
-                        "tool_count": len(tools),
-                        "servers": per_server,
-                        "tools": list(tools),
-                    },
-                })
-                if not tools:
-                    raise ValueError("No MCP server offered any tool")
-
-                selected = await OpenAICompatibleModel().select_visualization_tool(
-                    {
-                        "question": question,
-                        "query_result": analysis["table"],
-                    },
-                    [tool.schema for tool in tools.values()],
-                    reasoning_sink=(
-                        lambda delta: self._emit(
-                            event_sink, {"type": "reasoning_delta", "delta": delta}
-                        )
-                    ) if thinking_enabled else None,
-                    thinking_enabled=thinking_enabled,
-                )
-                if selected is None:
-                    return {**visualization, "status": "SKIPPED", "asset_url": None}
-                chosen = tools.get(selected.name)
-                if chosen is None:
-                    raise ValueError("Visualization agent selected an undiscovered MCP tool")
-                selected_call_id = selected.tool_call_id
-                selected_label = f"{chosen.server} · {selected.name}"
-                self._emit(event_sink, {
-                    "type": "tool_call", "tool_call_id": selected.tool_call_id,
-                    "name": selected_label, "status": "RUNNING",
-                    "arguments": selected.arguments,
-                })
-                result = await chosen.session.call_tool(selected.name, selected.arguments)
+                session = await _open_session(stack, chosen.server)
+                result = await session.call_tool(selected.name, selected.arguments)
             remote_url = self._extract_url(result.content)
             image_url = (
                 await self._cache_asset(remote_url, chosen.asset_hosts) if remote_url else None
             )
             status = "READY" if image_url else "FAILED"
-            result_payload = {
-                "status": status,
-                "asset_url": image_url,
-                "mcp_content": [getattr(item, "text", None) for item in result.content],
-            }
             self._emit(event_sink, {
                 "type": "tool_result", "tool_call_id": selected.tool_call_id,
                 "name": selected_label,
                 "status": "COMPLETED" if image_url else "FAILED",
-                "arguments": selected.arguments, "result": result_payload,
+                "arguments": selected.arguments,
+                "result": {
+                    "status": status,
+                    "asset_url": image_url,
+                    "mcp_content": [getattr(item, "text", None) for item in result.content],
+                },
             })
             return {
                 **visualization,
                 "status": status,
-                "server_name": chosen.server,
+                "server_name": chosen.server.name,
                 "tool_name": selected.name,
                 "title": str(selected.arguments.get("title") or selected.name),
                 "asset_url": image_url,

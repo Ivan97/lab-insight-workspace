@@ -29,6 +29,8 @@ Tool servers are declared in [`mcp.json`](mcp.json), using the same `mcpServers`
 }
 ```
 
+Tool schemas are discovered once per process and cached, warmed at startup. Starting a stdio server costs seconds, so the model chooses a tool from the cached schemas first and only the server owning the chosen tool is started -- a question that needs no chart starts nothing. Discovery failures are not cached, and never block startup: charts degrade, the app serves. `GET /api/v1/health` reports the warm-up result.
+
 `transport` is inferred from the entry shape (`command` for stdio, `url` for streamable HTTP) and may also be set explicitly. Set `enabled` to `false` to keep an entry without starting it, and override the file location with `MCP_CONFIG_PATH`.
 
 The file is committed, so secrets belong in `.env` and are referenced as `${VAR}` inside `env`, `args`, `url` or `headers`. `assetHosts` is an SSRF boundary: only those hosts may serve images a tool returns, and every image is cached and re-served from this origin. A malformed entry fails loudly rather than silently disabling a server. `GET /api/v1/health` reports the resolved configuration.

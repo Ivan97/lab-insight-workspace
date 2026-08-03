@@ -816,3 +816,49 @@ def test_skill_tools_are_scoped_and_execute_is_configurable(monkeypatch, tmp_pat
     names = {tool.name for tool in filesystem.tools}
     assert "execute" not in names
     assert "read_file" in names
+
+
+@pytest.mark.asyncio
+async def test_tool_schemas_are_discovered_once_and_reused(monkeypatch):
+    """Starting a stdio server costs seconds, so schemas are cached per process."""
+    from backend.app import mcp_chart
+
+    monkeypatch.setattr(mcp_chart, "_TOOL_CACHE", None)
+    calls: list[int] = []
+
+    async def fake_discover(servers):
+        calls.append(len(servers))
+        tool = mcp_chart.DiscoveredTool(
+            server=servers[0],
+            schema={"type": "function", "function": {"name": "generate_bar_chart"}},
+        )
+        return {"generate_bar_chart": tool}, {servers[0].name: {"tool_count": 1}}
+
+    monkeypatch.setattr(mcp_chart, "discover_tools", fake_discover)
+    servers = enabled_servers()
+
+    tools, _, from_cache = await mcp_chart.cached_tools(servers)
+    assert set(tools) == {"generate_bar_chart"} and from_cache is False
+    # The allowlist still travels with the tool, now via its server.
+    assert tools["generate_bar_chart"].asset_hosts == ("mdn.alipayobjects.com",)
+
+    _, _, from_cache = await mcp_chart.cached_tools(servers)
+    assert from_cache is True
+    assert calls == [1], "discovery must not run again once cached"
+
+    await mcp_chart.cached_tools(servers, refresh=True)
+    assert calls == [1, 1], "refresh must re-discover"
+
+    monkeypatch.setattr(mcp_chart, "_TOOL_CACHE", None)
+
+    async def failing_discover(servers):
+        return {}, {servers[0].name: {"error": "OSError: npx missing"}}
+
+    monkeypatch.setattr(mcp_chart, "discover_tools", failing_discover)
+    _, report, _ = await mcp_chart.cached_tools(servers)
+    assert "error" in report[servers[0].name]
+    # A transient failure must not be cached, or charts stay dead for the
+    # lifetime of the process.
+    assert mcp_chart._TOOL_CACHE is None
+    assert "error" not in await mcp_chart.prime_tool_cache()  # returns the report, not a raise
+    monkeypatch.setattr(mcp_chart, "_TOOL_CACHE", None)
