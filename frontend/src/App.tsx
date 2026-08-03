@@ -275,7 +275,14 @@ function SchemaPage({ sources, batchId, onSelectBatch, onCommitted, onAnalyze }:
   const [reviewTab, setReviewTab] = useState<'profile' | 'preview'>('profile')
   const [schemaMode, setSchemaMode] = useState<'fields' | 'relationships'>('fields')
   const [semantic, setSemantic] = useState<SemanticLayer | null>(null)
-  const source = sources.find((item) => item.batch_id === batchId) ?? sources[0]
+  // Sources still awaiting review come first, so the work to do is not buried
+  // behind files that are already published. Array.sort is stable, so the
+  // original order survives inside each group.
+  const orderedSources = useMemo(
+    () => [...sources].sort((a, b) => Number(b.status !== 'READY') - Number(a.status !== 'READY')),
+    [sources],
+  )
+  const source = sources.find((item) => item.batch_id === batchId) ?? orderedSources[0]
   const sourceId = source?.batch_id
   useEffect(() => {
     if (!sourceId) return
@@ -304,7 +311,7 @@ function SchemaPage({ sources, batchId, onSelectBatch, onCommitted, onAnalyze }:
     {schemaMode === 'relationships' ? <RelationshipsPanel semantic={semantic} onPublished={setSemantic} /> : <>
     <section className="schema-source-switcher section-card" aria-label="Schema sources">
       <div className="schema-source-switcher-head"><div><strong>Source schemas</strong><span>{sources.length} connected files</span></div><small>Select a file to inspect its profile and field mapping.</small></div>
-      <div className="schema-source-tabs" role="tablist">{sources.map((item) => <button role="tab" aria-selected={item.batch_id === source.batch_id} className={item.batch_id === source.batch_id ? 'active' : ''} key={item.batch_id} onClick={() => onSelectBatch(item.batch_id)}><span className={`mini-file-icon ${item.source_type.toLowerCase()}`}>{item.source_type === 'TEXT' ? 'TXT' : item.source_type}</span><span><strong>{item.source_name}</strong><small>{item.record_count.toLocaleString()} records</small></span></button>)}</div>
+      <div className="schema-source-tabs" role="tablist">{orderedSources.map((item) => { const needsReview = item.status !== 'READY'; return <button role="tab" aria-selected={item.batch_id === source.batch_id} className={item.batch_id === source.batch_id ? 'active' : ''} key={item.batch_id} onClick={() => onSelectBatch(item.batch_id)}><span className={`mini-file-icon ${item.source_type.toLowerCase()}`}>{item.source_type === 'TEXT' ? 'TXT' : item.source_type}</span><span><strong>{item.source_name}</strong><small>{item.record_count.toLocaleString()} records</small></span>{needsReview && <span className="source-tab-flag">Review</span>}</button> })}</div>
     </section>
     <section className="review-summary section-card"><div className="source-name"><div className={`file-icon ${source.source_type.toLowerCase()}`}>{source.source_type === 'TEXT' ? 'TXT' : source.source_type}</div><div><strong>{source.source_name}</strong><small>{source.record_count} records · mapping version {mapping.version}</small></div></div><div className="review-progress"><span>{mapping.mappings.filter((item) => item.confidence >= .8).length} auto-mapped</span><span>{attentionCount} need attention</span></div></section>
     {profile && preview && <section className="section-card data-review-card">
