@@ -32,6 +32,8 @@ export interface SchemaEntity { entity: string; display_name: string; descriptio
 
 export const api = {
   getCanonicalFields: () => json<{ items: string[] }>('/schema/canonical-fields'),
+  updateCanonicalField: (entity: string, field: string, patch: Partial<Pick<CanonicalField, 'display_name' | 'description' | 'result_format' | 'unit'>>) =>
+    json<CanonicalField>(`/schema/registry/${entity}/${field}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) }),
   getRegistry: () => json<{ entities: SchemaEntity[]; field_count: number }>('/schema/registry'),
   listIngestions: () => json<{ items: Ingestion[]; total: number }>('/ingestions'),
   getMapping: (batchId: string) => json<MappingDraft>(`/ingestions/${batchId}/mapping`),

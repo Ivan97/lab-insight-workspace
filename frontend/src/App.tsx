@@ -18,7 +18,7 @@ import {
   Upload,
 } from 'lucide-react'
 import { A2UIConversation, A2UIReplay } from './a2ui/A2UIConversation'
-import { api, type DataPreview, type DataProfile, type Ingestion, type JoinRuleInput, type MappingDraft, type SemanticLayer } from './api'
+import { api, type CanonicalField, type DataPreview, type DataProfile, type Ingestion, type JoinRuleInput, type MappingDraft, type SchemaEntity, type SemanticLayer } from './api'
 import './App.css'
 
 type Page = 'sources' | 'schema' | 'analyze'
@@ -266,7 +266,7 @@ function SchemaPage({ sources, batchId, onSelectBatch, onCommitted, onAnalyze }:
   const [profile, setProfile] = useState<DataProfile | null>(null)
   const [preview, setPreview] = useState<DataPreview | null>(null)
   const [reviewTab, setReviewTab] = useState<'profile' | 'preview'>('profile')
-  const [schemaMode, setSchemaMode] = useState<'fields' | 'relationships'>('fields')
+  const [schemaMode, setSchemaMode] = useState<'registry' | 'relationships' | 'fields'>('registry')
   const [semantic, setSemantic] = useState<SemanticLayer | null>(null)
   // Mapping targets come from the registry. They used to be a literal in this
   // file, which is how the dropdown came to offer fields that do not exist.
@@ -304,8 +304,8 @@ function SchemaPage({ sources, batchId, onSelectBatch, onCommitted, onAnalyze }:
   const ignoredCount = mapping.mappings.filter((item) => !item.target_field).length
   return <div className="page schema-page">
     <section className="page-heading"><span className="eyebrow">SCHEMA REVIEW</span><h1>Make the meaning explicit.</h1><p>Review AI suggestions before anything enters the trusted analysis layer.</p></section>
-    <div className="schema-mode-tabs" role="tablist"><button className={schemaMode === 'fields' ? 'active' : ''} onClick={() => setSchemaMode('fields')}><FileSpreadsheet size={15} /> Fields & mapping</button><button className={schemaMode === 'relationships' ? 'active' : ''} onClick={() => setSchemaMode('relationships')}><GitMerge size={15} /> Relationships</button></div>
-    {schemaMode === 'relationships' ? <RelationshipsPanel semantic={semantic} onPublished={setSemantic} /> : <>
+    <div className="schema-mode-tabs" role="tablist"><button className={schemaMode === 'registry' ? 'active' : ''} onClick={() => setSchemaMode('registry')}><Database size={15} /> Canonical schema</button><button className={schemaMode === 'relationships' ? 'active' : ''} onClick={() => setSchemaMode('relationships')}><GitMerge size={15} /> Relationships</button><button className={schemaMode === 'fields' ? 'active' : ''} onClick={() => setSchemaMode('fields')}><FileSpreadsheet size={15} /> Source mapping</button></div>
+    {schemaMode === 'registry' ? <RegistryPanel /> : schemaMode === 'relationships' ? <RelationshipsPanel semantic={semantic} onPublished={setSemantic} /> : <>
     <section className="schema-source-switcher section-card" aria-label="Schema sources">
       <div className="schema-source-switcher-head"><div><strong>Source schemas</strong><span>{sources.length} connected files</span></div><small>Select a file to inspect its profile and field mapping.</small></div>
       <div className="schema-source-tabs" role="tablist">{orderedSources.map((item) => { const needsReview = item.status !== 'READY'; return <button role="tab" aria-selected={item.batch_id === source.batch_id} className={item.batch_id === source.batch_id ? 'active' : ''} key={item.batch_id} onClick={() => onSelectBatch(item.batch_id)}><span className={`mini-file-icon ${item.source_type.toLowerCase()}`}>{item.source_type === 'TEXT' ? 'TXT' : item.source_type}</span><span><strong>{item.source_name}</strong><small>{item.record_count.toLocaleString()} records</small></span>{needsReview && <span className="source-tab-flag">Review</span>}</button> })}</div>
@@ -329,6 +329,75 @@ function SchemaPage({ sources, batchId, onSelectBatch, onCommitted, onAnalyze }:
       <div className="mapping-footer"><div><span>{ignoredCount ? `${ignoredCount} of ${mapping.mappings.length} source fields will be ignored` : `All ${mapping.mappings.length} source fields are mapped`}</span></div><button className="primary-button" onClick={() => void commit()}>Confirm & publish <ArrowRight size={16} /></button></div>
     </section>
     </>}
+  </div>
+}
+
+const RESULT_FORMATS = ['TEXT', 'INTEGER', 'DECIMAL_2', 'CURRENCY_USD', 'PERCENT_2', 'DATE', 'MONTH', 'DATETIME']
+
+function RegistryPanel() {
+  const [entities, setEntities] = useState<SchemaEntity[] | null>(null)
+  const [saving, setSaving] = useState<string | null>(null)
+  const [error, setError] = useState('')
+
+  useEffect(() => { void api.getRegistry().then((value) => setEntities(value.entities)).catch(() => setError('Unable to load the canonical schema')) }, [])
+  if (error) return <section className="section-card relationship-loading">{error}</section>
+  if (!entities) return <section className="section-card relationship-loading">Loading canonical schema…</section>
+
+  const save = async (field: CanonicalField, patch: Partial<CanonicalField>) => {
+    const key = `${field.entity}.${field.field}`
+    setSaving(key); setError('')
+    try {
+      const updated = await api.updateCanonicalField(field.entity, field.field, patch)
+      setEntities((current) => current?.map((entity) => entity.entity !== field.entity ? entity : {
+        ...entity,
+        fields: entity.fields.map((item) => item.field === field.field ? updated : item),
+      }) ?? null)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Unable to save')
+    } finally { setSaving(null) }
+  }
+
+  return <div className="registry-workspace">
+    <section className="registry-intro section-card">
+      <div><strong>Canonical schema</strong><span>What a field means. Source mappings target these fields, and Text-to-SQL is told these descriptions.</span></div>
+      <span className="registry-count">{entities.reduce((total, entity) => total + entity.fields.length, 0)} fields · {entities.length} entities</span>
+    </section>
+    {error && <section className="section-card registry-error">{error}</section>}
+    {entities.map((entity) => <section className="section-card registry-entity" key={entity.entity}>
+      <div className="section-header">
+        <div><h2><code>{entity.entity}</code> <span className={`entity-role ${entity.role.toLowerCase()}`}>{entity.role}</span></h2><p>{entity.description}</p></div>
+        <span>{entity.fields.length} fields</span>
+      </div>
+      <div className="registry-table">
+        <div className="registry-row registry-head"><span>Field</span><span>Type</span><span>Description</span><span>Render as</span><span>Unit</span></div>
+        {entity.fields.map((field) => <div className="registry-row" key={field.field}>
+          <span className="registry-field">
+            <code>{field.field}</code>
+            {field.is_key && <em title="Key field">key</em>}
+            {!!field.enum_values.length && <small>{field.enum_values.join(' / ')}</small>}
+          </span>
+          {/* Identifier and type come from the physical table and are not editable. */}
+          <span className="registry-type">{field.data_type}{field.nullable ? '' : ' · required'}</span>
+          <input
+            defaultValue={field.description}
+            placeholder="What does this field mean?"
+            aria-label={`Description of ${field.field}`}
+            onBlur={(event) => { if (event.target.value !== field.description) void save(field, { description: event.target.value }) }}
+          />
+          <select value={field.result_format} aria-label={`Render format of ${field.field}`} onChange={(event) => void save(field, { result_format: event.target.value })}>
+            {RESULT_FORMATS.map((format) => <option key={format}>{format}</option>)}
+          </select>
+          <input
+            className="registry-unit"
+            defaultValue={field.unit ?? ''}
+            placeholder="—"
+            aria-label={`Unit of ${field.field}`}
+            onBlur={(event) => { if (event.target.value !== (field.unit ?? '')) void save(field, { unit: event.target.value }) }}
+          />
+          {saving === `${field.entity}.${field.field}` && <i className="registry-saving" aria-label="Saving" />}
+        </div>)}
+      </div>
+    </section>)}
   </div>
 }
 
