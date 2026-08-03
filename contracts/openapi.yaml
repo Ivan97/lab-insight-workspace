@@ -315,7 +315,6 @@ components:
         vendor_hint: {type: [string, "null"]}
         status: {type: string, enum: [UPLOADED, PROFILING, MAPPING, NEEDS_REVIEW, COMMITTING, READY, FAILED]}
         record_count: {type: integer}
-        quality_score: {type: number}
         current_stage: {type: [string, "null"]}
         created_at: {type: string, format: date-time}
         updated_at: {type: string, format: date-time}

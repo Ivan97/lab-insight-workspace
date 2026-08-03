@@ -18,10 +18,9 @@ type AgentEvent =
   | { id: string; type: 'reasoning'; segments: ReasoningSegment[]; status: string }
   | { id: string; type: 'tool_group'; calls: ToolCall[] }
   | { id: string; type: 'content'; markdown: string }
-type Kpi = { key: string; label: string; value: number; format: string }
 type ResultFormat = 'TEXT' | 'INTEGER' | 'DECIMAL_2' | 'CURRENCY_USD' | 'PERCENT_2' | 'DATE' | 'MONTH' | 'DATETIME'
-type Visualization = { status: string; tool_name?: string; title?: string; rationale?: string; asset_url?: string | null; error?: string; data: Record<string, string | number>[]; formats?: Record<string, ResultFormat> }
-type Analysis = { answer: string; requires_clarification?: boolean; kpis: Kpi[]; table: { columns: string[]; rows: Record<string, string | number>[]; formats?: Record<string, ResultFormat> }; insights: { kind: string; title: string; description: string }[]; sql: string | null; visualization: Visualization }
+type Visualization = { status: string; tool_name?: string; title?: string; asset_url?: string | null; error?: string; data: Record<string, string | number>[]; formats?: Record<string, ResultFormat> }
+type Analysis = { answer: string; requires_clarification?: boolean; table: { columns: string[]; rows: Record<string, string | number>[]; formats?: Record<string, ResultFormat> }; sql: string | null; visualization: Visualization }
 
 const ReasoningApi = { name: 'ReasoningPanel', schema: z.object({ segments: CommonSchemas.DynamicValue, status: CommonSchemas.DynamicValue }) }
 const ToolApi = { name: 'ToolCallGroup', schema: z.object({ groups: CommonSchemas.DynamicValue }) }
@@ -129,11 +128,9 @@ const AgentEventStream = createComponentImplementation(EventStreamApi, ({ props 
 
 const AnalysisResult = createComponentImplementation(AnalysisApi, ({ props }) => {
   const analysis = props.analysis as unknown as Analysis | undefined
-  if (!analysis?.kpis || analysis.requires_clarification || !analysis.table?.rows?.length) return null
+  if (analysis?.requires_clarification || !analysis?.table?.rows?.length) return null
   return <div className="analysis-result">
-    <div className="kpi-grid">{analysis.kpis.map((kpi) => <div className="kpi-card" key={kpi.key}><span>{kpi.label}</span><strong>{formatKpi(kpi)}</strong></div>)}</div>
     <VisualizationPanel visualization={analysis.visualization} />
-    <div className="insight-grid">{analysis.insights.map((insight) => <article key={insight.title}><span>{insight.kind}</span><h3>{insight.title}</h3><p>{insight.description}</p></article>)}</div>
     <div className="result-table-wrap"><div className="result-title"><h3>Query result</h3><span>{analysis.table.rows.length} rows</span></div><div className="result-scroll"><table><thead><tr>{analysis.table.columns.map((column) => <th key={column}>{humanize(column)}</th>)}</tr></thead><tbody>{analysis.table.rows.map((row, index) => <tr key={index}>{analysis.table.columns.map((column) => <td key={column}>{formatResultValue(row[column], analysis.table.formats?.[column])}</td>)}</tr>)}</tbody></table></div></div>
     <details className="sql-disclosure"><summary>View SQL & metric definitions <ChevronDown size={14} /></summary><pre><code>{analysis.sql}</code></pre></details>
   </div>
@@ -144,7 +141,7 @@ function VisualizationPanel({ visualization }: { visualization: Visualization })
   const safeUrl = visualization.asset_url && isSafeImageUrl(visualization.asset_url) ? visualization.asset_url : null
   const title = visualization.title ?? 'Generated visualization'
   const toolName = visualization.tool_name ?? 'chart'
-  return <section className="visualization-panel"><div className="visualization-head"><div><span>VISUALIZATION AGENT</span><h3>{title}</h3>{visualization.rationale && <p>{visualization.rationale}</p>}</div><span className="mcp-chip">AntV MCP · {toolName.replace('generate_', '').replace('_chart', '')}</span></div>
+  return <section className="visualization-panel"><div className="visualization-head"><div><span>VISUALIZATION AGENT</span><h3>{title}</h3></div><span className="mcp-chip">AntV MCP · {toolName.replace('generate_', '').replace('_chart', '')}</span></div>
     <SafeImage src={safeUrl ?? undefined} alt={title} />
   </section>
 }
@@ -171,7 +168,6 @@ function isSafeImageUrl(value: string) {
   try { const url = new URL(value, window.location.origin); return url.origin === window.location.origin || (url.protocol === 'https:' && url.hostname === 'mdn.alipayobjects.com') } catch { return false }
 }
 function formatToolValue(value: unknown) { return typeof value === 'string' ? value : JSON.stringify(value ?? {}, null, 2) }
-function formatKpi(kpi: Kpi) { if (kpi.format === 'CURRENCY_USD') return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(kpi.value); if (kpi.format === 'PERCENT') return `${kpi.value}%`; if (kpi.format === 'DAYS') return `${kpi.value} days`; return kpi.value.toLocaleString() }
 function humanize(value: string) { return value.replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase()) }
 function formatResultValue(value: string | number, format?: ResultFormat) {
   if (format === 'DATE') return String(value).slice(0, 10)

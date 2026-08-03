@@ -13,7 +13,6 @@ class IngestionBatch(BaseModel):
         "UPLOADED", "PROFILING", "MAPPING", "NEEDS_REVIEW", "COMMITTING", "READY", "FAILED"
     ]
     record_count: int = 0
-    quality_score: float = 0
     current_stage: str | None = None
     created_at: datetime
     updated_at: datetime

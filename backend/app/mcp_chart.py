@@ -105,7 +105,6 @@ class AntVChartClient:
                 "status": status,
                 "tool_name": selected.name,
                 "title": str(selected.arguments.get("title") or selected.name),
-                "rationale": "",
                 "asset_url": image_url,
             }
         except Exception as exc:  # noqa: BLE001 - MCP failure must not fail analysis.

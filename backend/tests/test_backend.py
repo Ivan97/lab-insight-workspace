@@ -334,9 +334,7 @@ async def test_stream_is_ordered_and_completes(
         return {
             "answer": "Query completed.",
             "requires_clarification": False,
-            "kpis": [],
             "table": {"columns": ["vendor", "tests"], "rows": [{"vendor": "A", "tests": 2}], "row_count": 1, "truncated": False},
-            "insights": [],
             "sql": "SELECT vendor, count(*) AS tests FROM fact_test_results GROUP BY vendor LIMIT 200",
             "visualization": {"status": "PENDING", "data": [{"vendor": "A", "tests": 2}]},
             "warnings": [],
@@ -417,3 +415,53 @@ async def test_unconfigured_model_fails_instead_of_mocking(monkeypatch):
                 "question", {"answer": "This must never be returned as a mock."}
             )
         ]
+
+
+def test_legacy_database_drops_hardcoded_quality_score(tmp_path, monkeypatch):
+    """init_schema must migrate databases created before quality_score was removed."""
+    import duckdb
+
+    from backend.app import database
+
+    legacy_path = tmp_path / "legacy.duckdb"
+    legacy = duckdb.connect(str(legacy_path))
+    legacy.execute(
+        """
+        CREATE TABLE ingestion_batches (
+            batch_id VARCHAR PRIMARY KEY, source_type VARCHAR NOT NULL,
+            source_name VARCHAR NOT NULL, vendor_hint VARCHAR, status VARCHAR NOT NULL,
+            record_count INTEGER NOT NULL, quality_score DOUBLE NOT NULL,
+            current_stage VARCHAR, created_at TIMESTAMP NOT NULL, updated_at TIMESTAMP NOT NULL
+        )
+        """
+    )
+    legacy.execute(
+        "INSERT INTO ingestion_batches VALUES "
+        "('b1', 'CSV', 'legacy.csv', NULL, 'READY', 7, 86, 'Ready', now(), now())"
+    )
+    legacy.close()
+
+    monkeypatch.setattr(database, "DATABASE_PATH", legacy_path)
+    monkeypatch.setattr(database, "_database_connection", None)
+    database.init_schema()
+
+    with database.connection() as conn:
+        columns = [row[0] for row in conn.execute("DESCRIBE ingestion_batches").fetchall()]
+        assert "quality_score" not in columns
+        # Existing rows survive the migration and new inserts match the new arity.
+        conn.execute(
+            "INSERT INTO ingestion_batches VALUES "
+            "('b2', 'CSV', 'new.csv', NULL, 'READY', 3, 'Ready', now(), now())"
+        )
+        assert conn.execute("SELECT count(*) FROM ingestion_batches").fetchone()[0] == 2
+        conn.close()
+    database._database_connection = None
+
+
+def test_analysis_payload_carries_no_question_independent_metrics():
+    """The answer surface must not ship figures that ignore the user's question."""
+    from backend.app.analysis import _empty_analysis
+
+    payload = _empty_analysis("Which vendor?")
+    assert "kpis" not in payload
+    assert "insights" not in payload

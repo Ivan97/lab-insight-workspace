@@ -157,9 +157,9 @@ async def upload_file(file: UploadFile = File(...), vendor_hint: str | None = No
                 "target_field": target,
                 "confidence": 0.9 if target else 0.35,
                 "transform": "IDENTITY",
-                "reason": "Matched from field name and sampled values"
+                "reason": "Matched on a token in the source field name"
                 if target
-                else "No confident canonical field match",
+                else "No canonical field matched the source field name",
                 "status": "SUGGESTED" if target else "IGNORED",
                 "sample_before": samples,
                 "sample_after": samples,
@@ -168,7 +168,7 @@ async def upload_file(file: UploadFile = File(...), vendor_hint: str | None = No
         )
     with connection() as conn:
         conn.execute(
-            "INSERT INTO ingestion_batches VALUES (?, ?, ?, ?, 'NEEDS_REVIEW', ?, 86, 'Review field mapping', ?, ?)",
+            "INSERT INTO ingestion_batches VALUES (?, ?, ?, ?, 'NEEDS_REVIEW', ?, 'Review field mapping', ?, ?)",
             [batch_id, source_type, file.filename or "upload", vendor_hint, frame.height, now, now],
         )
         conn.execute(
@@ -190,7 +190,7 @@ def ingest_text(request: TextIngestionRequest):
     profile, preview = profile_text(request.content)
     with connection() as conn:
         conn.execute(
-            "INSERT INTO ingestion_batches VALUES (?, 'TEXT', ?, ?, 'NEEDS_REVIEW', ?, 80, 'Review extracted fields', ?, ?)",
+            "INSERT INTO ingestion_batches VALUES (?, 'TEXT', ?, ?, 'NEEDS_REVIEW', ?, 'Review extracted fields', ?, ?)",
             [batch_id, request.source_name, request.vendor_hint, count, now, now],
         )
         conn.execute(

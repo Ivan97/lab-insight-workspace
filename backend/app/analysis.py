@@ -22,9 +22,7 @@ def _empty_analysis(answer: str) -> dict[str, Any]:
     return {
         "answer": answer,
         "requires_clarification": True,
-        "kpis": [],
         "table": {"columns": [], "rows": [], "row_count": 0, "truncated": False},
-        "insights": [],
         "sql": None,
         "visualization": {
             "status": "SKIPPED",
@@ -173,48 +171,9 @@ def run_analysis(
             plan, event_sink, attempt=2, cancellation_token=cancellation_token
         )
 
-    with connection() as conn:
-        remove_interrupt = (
-            cancellation_token.add_callback(conn.interrupt)
-            if cancellation_token
-            else lambda: None
-        )
-        try:
-            total_tests, total_cost, pass_rate, turnaround = conn.execute(
-                """
-                SELECT count(*), round(sum(cost_usd), 2),
-                       round(100.0 * sum(CASE WHEN result = 'PASS' THEN 1 ELSE 0 END) / count(*), 1),
-                       round(avg(turnaround_days), 1)
-                FROM fact_test_results
-                """
-            ).fetchone()
-        finally:
-            remove_interrupt()
-
     return {
         "answer": "The query completed successfully. Base the response only on its returned rows.",
         "requires_clarification": False,
-        "kpis": [
-            {"key": "tests", "label": "Tests", "value": total_tests, "format": "INTEGER"},
-            {
-                "key": "cost",
-                "label": "Total cost",
-                "value": total_cost,
-                "format": "CURRENCY_USD",
-            },
-            {
-                "key": "pass_rate",
-                "label": "Pass rate",
-                "value": pass_rate,
-                "format": "PERCENT",
-            },
-            {
-                "key": "turnaround",
-                "label": "Avg. turnaround",
-                "value": turnaround,
-                "format": "DAYS",
-            },
-        ],
         "table": {
             "columns": list(rows[0]) if rows else [],
             "formats": plan.formats,
@@ -222,7 +181,6 @@ def run_analysis(
             "row_count": len(rows),
             "truncated": len(rows) == 200,
         },
-        "insights": [],
         "sql": guarded_sql,
         "visualization": {
             "status": "PENDING" if rows else "SKIPPED",
