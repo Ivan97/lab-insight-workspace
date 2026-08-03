@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import uuid
 from contextlib import asynccontextmanager
@@ -15,8 +16,11 @@ from .cancellation import cancel_active, register_cancellation, unregister_cance
 from .config import ARTIFACT_DIR, CATALOG_ID, DEMO_SOURCE_DIR, FRONTEND_DIST
 from .database import connection, init_schema, json_dumps, rows_as_dicts, utcnow
 from .demo_data import default_mappings, initialize_demo
+from .logging_config import configure_logging
+from .logging_config import describe as describe_logging
 from .mcp_chart import prime_tool_cache
 from .mcp_config import config_path, load_servers
+from .model_runtime import current_provider
 from .profiling import preview_frame, profile_frame, profile_text
 from .schemas import (
     A2UIActionRequest,
@@ -35,16 +39,25 @@ from .semantic import (
 )
 from .skills import discovered_skills, execute_enabled, skill_dir
 
+logger = logging.getLogger("prism.app")
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    configure_logging()
+    logger.info("starting up")
     init_schema()
     initialize_demo()
     initialize_semantic_layer()
     # Warms the MCP tool schemas so the first chart does not pay discovery, and
     # so the model can pick a tool before any server is started. Never fatal.
     app.state.mcp_discovery = await prime_tool_cache()
+    logger.info(
+        "ready provider=%s skills=%s mcp=%s",
+        current_provider().value, discovered_skills(), app.state.mcp_discovery,
+    )
     yield
+    logger.info("shutting down")
 
 
 app = FastAPI(title="Lab Insight Workspace", version="0.1.0", lifespan=lifespan)
@@ -67,6 +80,7 @@ def health() -> dict:
             "provider": os.getenv("LLM_PROVIDER", "not-configured"),
             "configured": model_configured,
         },
+        "logging": describe_logging(),
         "skills": {
             "directory": str(skill_dir()),
             "execute_enabled": execute_enabled(),

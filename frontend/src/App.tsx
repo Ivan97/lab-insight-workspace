@@ -395,7 +395,8 @@ function AnalyzePage({ sessions, activeSessionId, ask, setRunning }: { sessions:
 
   // Single source of truth for the composer toggle: suggestion cards and the
   // composer must send the same reasoning mode for a session.
-  const reasoningFor = (sessionId: string) => reasoningBySession[sessionId] ?? true
+  // Thinking is opt-in; the toggle starts off.
+  const reasoningFor = (sessionId: string) => reasoningBySession[sessionId] ?? false
   const setReasoningFor = (sessionId: string, value: boolean) => setReasoningBySession((current) => ({ ...current, [sessionId]: value }))
 
   return <div className="page analyze-page">

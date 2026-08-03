@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import suppress
@@ -11,6 +12,8 @@ from .config import CATALOG_ID
 from .conversation import recent_messages
 from .database import connection, json_dumps, utcnow
 from .mcp_chart import McpVisualizationClient
+
+logger = logging.getLogger("prism.stream")
 
 COMPONENTS = [
     {"id": "root", "component": "Column", "children": ["eventStream", "analysis"]},
@@ -70,7 +73,7 @@ class A2UIStream:
         question: str,
         message_id: str | None = None,
         resume_after: int = 0,
-        reasoning_enabled: bool = True,
+        reasoning_enabled: bool = False,
         cancellation_token: CancellationToken | None = None,
     ) -> None:
         self.conversation_id = conversation_id
@@ -147,9 +150,11 @@ class A2UIStream:
                     )
                 )
         except AnalysisCancelled:
+            logger.info("stream cancelled message=%s", self.message_id)
             yield self._sse(self._update("/status", "CANCELLED"))
             return
-        except Exception:  # noqa: BLE001 - stream failures must become visible UI state.
+        except Exception:
+            logger.exception("stream failed message=%s", self.message_id)
             async for event in self._failure_events(
                 "无法完成真实数据查询。请检查模型配置或换一种数据问题后重试。"
             ):

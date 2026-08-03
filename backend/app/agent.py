@@ -12,6 +12,7 @@ agent returns through tool output rather than a return value.
 """
 
 import json
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -27,6 +28,8 @@ from .model_runtime import answer_text, chat_model, reasoning_text
 from .semantic import semantic_prompt_context
 from .skills import skill_middleware
 from .sql_guard import guard_sql
+
+logger = logging.getLogger("prism.agent")
 
 AgentEventSink = Callable[[dict[str, Any]], None]
 
@@ -132,6 +135,7 @@ def build_query_tool(
                   "arguments": {"sql": sql}, "result": {"error": str(exc)}})
             # Returned rather than raised: the agent can repair and retry,
             # which is what the old two-attempt repair loop did by hand.
+            logger.warning("sql rejected attempt=%s reason=%s sql=%r", attempts["n"], exc, sql)
             return f"REJECTED: {exc}"
         emit({"type": "tool_result", "tool_call_id": guard_id,
               "name": "SQLGlot · validate_sql", "status": "COMPLETED",
@@ -159,6 +163,7 @@ def build_query_tool(
             emit({"type": "tool_result", "tool_call_id": query_id,
                   "name": "DuckDB · execute_query", "status": "FAILED",
                   "arguments": {"sql": guarded}, "result": {"error": str(exc)}})
+            logger.error("query failed attempt=%s error=%s sql=%r", attempts["n"], exc, guarded)
             return f"QUERY FAILED: {exc}"
 
         json_rows = [
@@ -170,6 +175,7 @@ def build_query_tool(
               "result": {"row_count": len(json_rows),
                          "columns": list(json_rows[0]) if json_rows else [],
                          "rows": json_rows}})
+        logger.info("query ok attempt=%s rows=%s", attempts["n"], len(json_rows))
         run.sql = guarded
         run.rows = json_rows
         run.columns = list(json_rows[0]) if json_rows else []
@@ -225,6 +231,10 @@ async def stream_agent(
         if event_sink:
             event_sink(event)
 
+    logger.info(
+        "agent start thinking=%s history_turns=%s question=%r",
+        thinking_enabled, len(history or []), question[:120],
+    )
     agent = build_agent(run, sink, cancellation_token, thinking_enabled)
     messages = [*(history or []), {"role": "user", "content": question}]
     seen_tool_calls: set[str] = set()
@@ -268,3 +278,7 @@ async def stream_agent(
                         }
     while buffered:
         yield buffered.pop(0)
+    logger.info(
+        "agent done queries=%s rows=%s answered=%s",
+        1 if run.sql else 0, len(run.rows), run.answered,
+    )

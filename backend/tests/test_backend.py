@@ -862,3 +862,39 @@ async def test_tool_schemas_are_discovered_once_and_reused(monkeypatch):
     assert mcp_chart._TOOL_CACHE is None
     assert "error" not in await mcp_chart.prime_tool_cache()  # returns the report, not a raise
     monkeypatch.setattr(mcp_chart, "_TOOL_CACHE", None)
+
+
+def test_logs_rotate_and_stay_bounded(tmp_path, monkeypatch):
+    """Old logs must be deleted, or a long-running box fills its disk."""
+    import logging
+
+    from backend.app import logging_config
+
+    monkeypatch.setenv("LOG_DIR", str(tmp_path))
+    monkeypatch.setenv("LOG_MAX_BYTES", "2048")
+    monkeypatch.setenv("LOG_BACKUP_COUNT", "2")
+    monkeypatch.setattr(logging_config, "_configured", False)
+    previous = logging.getLogger().handlers[:]
+    try:
+        logging_config.configure_logging()
+        described = logging_config.describe()
+        # The bound the operator actually cares about.
+        assert described["max_total_bytes"] == 2048 * 3
+
+        logger = logging.getLogger("prism.test")
+        for index in range(400):
+            logger.info("filler line %s %s", index, "x" * 80)
+
+        written = sorted(tmp_path.glob("app.log*"))
+        assert len(written) == 3, "active file plus exactly backup_count older ones"
+        total = sum(path.stat().st_size for path in written)
+        assert total <= described["max_total_bytes"] * 1.1
+        # Rotation deletes rather than accumulates.
+        assert not (tmp_path / "app.log.3").exists()
+    finally:
+        logging.getLogger().handlers = previous
+        logging_config._configured = False
+
+    monkeypatch.setenv("LOG_MAX_BYTES", "0")
+    with pytest.raises(ValueError, match="LOG_MAX_BYTES"):
+        logging_config.max_bytes()

@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import logging
 from collections.abc import Callable
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
@@ -13,6 +14,8 @@ from mcp.client.streamable_http import streamablehttp_client
 from .config import ARTIFACT_DIR
 from .mcp_config import McpServer, McpTransport, enabled_servers
 from .model_client import OpenAICompatibleModel
+
+logger = logging.getLogger("prism.mcp")
 
 ChartEventSink = Callable[[dict[str, Any]], None]
 
@@ -89,6 +92,7 @@ async def discover_tools(
                     )
                 report[server.name] = {"tool_count": len(discovered.tools)}
         except Exception as exc:  # noqa: BLE001 - one bad server must not hide the rest.
+            logger.warning("mcp server %s unavailable: %s", server.name, exc)
             report[server.name] = {"error": f"{type(exc).__name__}: {exc}"}
     return tools, report
 
@@ -111,6 +115,7 @@ async def cached_tools(
         # A server that failed is not cached as empty: a transient npx failure
         # would otherwise disable charts for the life of the process.
         if tools:
+            logger.info("mcp tools discovered count=%s servers=%s", len(tools), list(report))
             _TOOL_CACHE = (tools, report)
         return tools, report, False
 
@@ -189,6 +194,7 @@ class McpVisualizationClient:
                 raise ValueError("Visualization agent selected an undiscovered MCP tool")
             selected_call_id = selected.tool_call_id
             selected_label = f"{chosen.server.name} · {selected.name}"
+            logger.info("mcp tool selected server=%s tool=%s", chosen.server.name, selected.name)
             self._emit(event_sink, {
                 "type": "tool_call", "tool_call_id": selected.tool_call_id,
                 "name": selected_label, "status": "RUNNING",
