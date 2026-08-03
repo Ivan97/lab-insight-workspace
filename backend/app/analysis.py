@@ -135,6 +135,7 @@ def run_analysis(
     event_sink: AnalysisEventSink | None = None,
     cancellation_token: CancellationToken | None = None,
     thinking_enabled: bool = True,
+    history: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     planner = TextToSQLPlanner()
     def reasoning_sink(chunk: str) -> None:
@@ -148,6 +149,7 @@ def run_analysis(
         question,
         reasoning_sink=reasoning_sink if thinking_enabled else None,
         thinking_enabled=thinking_enabled,
+        history=history,
     )
     if plan.clarification:
         return _empty_analysis(plan.clarification)
@@ -164,6 +166,7 @@ def run_analysis(
             repair_context=str(exc),
             reasoning_sink=reasoning_sink if thinking_enabled else None,
             thinking_enabled=thinking_enabled,
+            history=history,
         )
         if plan.clarification:
             return _empty_analysis(plan.clarification)

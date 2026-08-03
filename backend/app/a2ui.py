@@ -8,6 +8,7 @@ from typing import Any
 from .analysis import run_analysis
 from .cancellation import AnalysisCancelled, CancellationToken
 from .config import CATALOG_ID
+from .conversation import recent_messages
 from .database import connection, json_dumps, utcnow
 from .mcp_chart import AntVChartClient
 from .model_client import OpenAICompatibleModel
@@ -95,6 +96,8 @@ class A2UIStream:
 
     async def events(self) -> AsyncIterator[str]:
         self._create_message()
+        # Loaded after the current turn exists so it can be excluded by timestamp.
+        history = recent_messages(self.conversation_id, self.message_id)
         yield self._sse(
             self._envelope(
                 "createSurface",
@@ -128,6 +131,7 @@ class A2UIStream:
                 receive_analysis_event,
                 self.cancellation_token,
                 self.reasoning_enabled,
+                history,
             )
         )
         try:
@@ -224,7 +228,7 @@ class A2UIStream:
         else:
             try:
                 async for model_event in OpenAICompatibleModel().stream_answer(
-                    self.question, analysis, self.reasoning_enabled
+                    self.question, analysis, self.reasoning_enabled, history
                 ):
                     if self._is_cancelled():
                         yield self._sse(self._update("/status", "CANCELLED"))

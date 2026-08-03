@@ -7,12 +7,18 @@ from typing import Any
 import httpx
 
 from .config import ROOT_DIR  # noqa: F401 - importing config loads local runtime settings.
+from .conversation import with_history
 from .model_runtime import apply_thinking_mode, reasoning_from_delta
 from .text_to_sql import ModelConfigurationError, ModelRequestError
 
 ANSWER_SYSTEM_PROMPT = """You are a careful internal data analyst.
 Answer only from the supplied query result and never invent causes or numbers.
 Write concise Markdown: lead with the direct answer, then at most two evidence bullets.
+
+Earlier turns of this conversation are supplied before the current question. Use them
+only to understand what is being asked and to avoid repeating context the user already
+has. Every figure you state must come from the current query result, never from an
+earlier turn.
 
 Presentation contract:
 - Preserve the values and units returned by SQL; do not recompute metrics.
@@ -56,6 +62,7 @@ class OpenAICompatibleModel:
         question: str,
         analysis: dict[str, Any],
         thinking_enabled: bool = True,
+        history: list[dict[str, str]] | None = None,
     ) -> AsyncIterator[dict[str, str]]:
         if not self.configured:
             raise ModelConfigurationError(
@@ -65,10 +72,7 @@ class OpenAICompatibleModel:
         payload = apply_thinking_mode({
             "stream": True,
             "temperature": 0.1,
-            "messages": [
-                {"role": "system", "content": ANSWER_SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
+            "messages": with_history(ANSWER_SYSTEM_PROMPT, history, prompt),
         }, thinking_enabled)
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
         url = f"{self.base_url}/chat/completions"

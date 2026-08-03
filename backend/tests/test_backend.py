@@ -362,11 +362,13 @@ async def test_stream_is_ordered_and_completes(
             "asset_url": "/api/v1/assets/chart.png",
         }
 
+    observed_history: list = []
     monkeypatch.setattr("backend.app.a2ui.AntVChartClient.render", fake_render)
     def fake_analysis(
-        _question, event_sink, _cancellation_token, thinking_enabled
+        _question, event_sink, _cancellation_token, thinking_enabled, history
     ):
         observed_modes.append(thinking_enabled)
+        observed_history.append(history)
         event_sink({"type": "reasoning_delta", "delta": "按供应商聚合测试数量。"})
         event_sink({
             "type": "tool_result", "tool_call_id": "duckdb_query:1",
@@ -384,8 +386,9 @@ async def test_stream_is_ordered_and_completes(
 
     monkeypatch.setattr("backend.app.a2ui.run_analysis", fake_analysis)
 
-    async def fake_answer(self, question, analysis, thinking_enabled):
+    async def fake_answer(self, question, analysis, thinking_enabled, history):
         observed_modes.append(thinking_enabled)
+        observed_history.append(history)
         yield {"type": "content_delta", "delta": "A has 2 tests."}
 
     monkeypatch.setattr("backend.app.a2ui.OpenAICompatibleModel.stream_answer", fake_answer)
@@ -416,6 +419,9 @@ async def test_stream_is_ordered_and_completes(
     tool_event = next(event for event in final_events if event["type"] == "tool_group")
     content_event = next(event for event in final_events if event["type"] == "content")
     assert tool_event["calls"][0]["arguments"] == {"sql": "SELECT 1"}
+    # The first turn has no prior context, but history must still be threaded
+    # through both model calls rather than dropped on the way.
+    assert observed_history == [[], []]
     assert content_event["markdown"] == "A has 2 tests."
     with TestClient(app) as client:
         history = client.get(
@@ -574,3 +580,67 @@ def test_conversations_persist_and_can_be_deleted(client: TestClient):
             "SELECT count(*) FROM a2ui_events WHERE message_id = 'a1'"
         ).fetchone()[0] == 0
     assert client.delete(f"/api/v1/conversations/{conversation_id}").status_code == 404
+
+
+def test_conversation_history_is_sent_to_the_model(client: TestClient):
+    """A follow-up has nothing to resolve against unless earlier turns are sent."""
+    from backend.app.conversation import MAX_CHARS_PER_MESSAGE, recent_messages, with_history
+
+    conversation_id = client.post("/api/v1/conversations").json()["conversation_id"]
+    with connection() as conn:
+        base = utcnow()
+        rows = [
+            ("u1", "USER", "Compare cost by vendor", "COMPLETED", 0),
+            ("a1", "ASSISTANT", "DeltaLab is highest at $19,300.02.", "COMPLETED", 0),
+            ("u2", "USER", "Now only Ceramic-C", "COMPLETED", 1),
+            ("a2", "ASSISTANT", "", "STREAMING", 1),
+        ]
+        for message_id, role, content, status, offset in rows:
+            conn.execute(
+                "INSERT INTO messages VALUES (?, ?, ?, ?, ?, NULL, ?, NULL)",
+                [message_id, conversation_id, role, content, status,
+                 base.replace(microsecond=offset * 1000)],
+            )
+
+    history = recent_messages(conversation_id, "a2")
+    # The in-flight turn and its own question are excluded; earlier turns are not.
+    assert history == [
+        {"role": "user", "content": "Compare cost by vendor"},
+        {"role": "assistant", "content": "DeltaLab is highest at $19,300.02."},
+    ]
+
+    messages = with_history("SYSTEM", history, "Now only Ceramic-C")
+    assert [m["role"] for m in messages] == ["system", "user", "assistant", "user"]
+    assert messages[0]["content"] == "SYSTEM"
+    assert messages[-1]["content"] == "Now only Ceramic-C"
+
+    # An empty conversation still produces a well-formed two-message prompt.
+    assert with_history("SYSTEM", [], "Q") == [
+        {"role": "system", "content": "SYSTEM"},
+        {"role": "user", "content": "Q"},
+    ]
+
+    with connection() as conn:
+        conn.execute(
+            "UPDATE messages SET content = ?, status = 'COMPLETED' WHERE message_id = 'a2'",
+            ["x" * (MAX_CHARS_PER_MESSAGE + 500)],
+        )
+        conn.execute(
+            "INSERT INTO messages VALUES ('u3', ?, 'USER', 'And by month?', 'COMPLETED', "
+            "NULL, ?, NULL)",
+            [conversation_id, utcnow()],
+        )
+        conn.execute(
+            "INSERT INTO messages VALUES ('a3', ?, 'ASSISTANT', '', 'STREAMING', NULL, ?, NULL)",
+            [conversation_id, utcnow()],
+        )
+    clipped = next(m for m in recent_messages(conversation_id, "a3") if m["content"].startswith("x"))
+    assert len(clipped["content"]) == MAX_CHARS_PER_MESSAGE + 1  # includes the ellipsis
+
+    client.delete(f"/api/v1/conversations/{conversation_id}")
+
+
+def test_prompts_bound_history_to_context_not_figures():
+    assert "Earlier turns of this conversation" in SYSTEM_PROMPT
+    assert "Earlier turns of this conversation" in ANSWER_SYSTEM_PROMPT
+    assert "never from an\nearlier turn" in ANSWER_SYSTEM_PROMPT

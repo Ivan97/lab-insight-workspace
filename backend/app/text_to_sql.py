@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 import httpx
 
 from .config import ROOT_DIR  # noqa: F401 - importing config loads local runtime settings.
+from .conversation import with_history
 from .model_runtime import apply_thinking_mode, reasoning_from_delta
 from .semantic import semantic_prompt_context
 
@@ -54,6 +55,12 @@ Rules:
   - Only return a timestamp when the user explicitly asks for time-of-day detail; then use '%Y-%m-%d %H:%M:%S'.
 - Return a formats entry for every selected alias. Allowed format values are TEXT, INTEGER,
   DECIMAL_2, CURRENCY_USD, PERCENT_2, DATE, MONTH, and DATETIME.
+- Earlier turns of this conversation are supplied before the current question.
+  Use them to resolve follow-ups that depend on context ("now only Ceramic-C",
+  "same thing by month", "sort it the other way"). Restate the resolved intent in
+  the SQL rather than assuming the reader remembers the earlier turn.
+- If the message asks about the conversation itself rather than the data, answer it
+  directly in clarification using those earlier turns, and set sql to null.
 - If the message is not an analytical data question, set clarification to a short helpful question and sql to null.
 Required JSON shape:
 {
@@ -93,6 +100,7 @@ class TextToSQLPlanner:
         repair_context: str | None = None,
         reasoning_sink: Callable[[str], None] | None = None,
         thinking_enabled: bool = True,
+        history: list[dict[str, str]] | None = None,
     ) -> GeneratedPlan:
         if not self.base_url or not self.api_key or not self.model:
             raise ModelConfigurationError(
@@ -104,10 +112,9 @@ class TextToSQLPlanner:
         payload = apply_thinking_mode({
             "stream": True,
             "temperature": 0,
-            "messages": [
-                {"role": "system", "content": f"{SYSTEM_PROMPT}\n\n{semantic_prompt_context()}"},
-                {"role": "user", "content": user_prompt},
-            ],
+            "messages": with_history(
+                f"{SYSTEM_PROMPT}\n\n{semantic_prompt_context()}", history, user_prompt
+            ),
         }, thinking_enabled)
         try:
             with httpx.Client(timeout=35, trust_env=False) as client, client.stream(
