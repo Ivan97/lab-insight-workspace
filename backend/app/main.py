@@ -32,6 +32,7 @@ from .semantic import (
     initialize_semantic_layer,
     replace_semantic_rules,
 )
+from .skills import discovered_skills, execute_enabled, skill_dir
 
 
 @asynccontextmanager
@@ -61,6 +62,11 @@ def health() -> dict:
         "model": {
             "provider": os.getenv("LLM_PROVIDER", "not-configured"),
             "configured": model_configured,
+        },
+        "skills": {
+            "directory": str(skill_dir()),
+            "execute_enabled": execute_enabled(),
+            "discovered": discovered_skills(),
         },
         "visualization_mcp": {
             "status": "on-demand",

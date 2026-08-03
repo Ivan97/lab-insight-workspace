@@ -5,13 +5,12 @@ from contextlib import suppress
 from datetime import UTC, datetime
 from typing import Any
 
-from .analysis import run_analysis
+from .agent import AnalysisRun, stream_agent
 from .cancellation import AnalysisCancelled, CancellationToken
 from .config import CATALOG_ID
 from .conversation import recent_messages
 from .database import connection, json_dumps, utcnow
 from .mcp_chart import McpVisualizationClient
-from .model_client import OpenAICompatibleModel
 
 COMPONENTS = [
     {"id": "root", "component": "Column", "children": ["eventStream", "analysis"]},
@@ -116,48 +115,37 @@ class A2UIStream:
         )
         yield self._sse(self._update("/", self.model))
 
-        event_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
-        loop = asyncio.get_running_loop()
-
-        def receive_analysis_event(event: dict[str, Any]) -> None:
-            if event["type"] == "reasoning_delta" and not self.reasoning_enabled:
-                return
-            loop.call_soon_threadsafe(event_queue.put_nowait, event)
-
-        analysis_task = asyncio.create_task(
-            asyncio.to_thread(
-                run_analysis,
-                self.question,
-                receive_analysis_event,
-                self.cancellation_token,
-                self.reasoning_enabled,
-                history,
-            )
-        )
+        run = AnalysisRun()
+        markdown = ""
         try:
-            while not analysis_task.done() or not event_queue.empty():
-                try:
-                    event = await asyncio.wait_for(event_queue.get(), timeout=0.05)
-                except TimeoutError:
+            async for event in stream_agent(
+                self.question,
+                run,
+                cancellation_token=self.cancellation_token,
+                thinking_enabled=self.reasoning_enabled,
+                history=history,
+            ):
+                kind = event["type"]
+                if kind == "reasoning_delta":
+                    if self.reasoning_enabled:
+                        yield self._sse(self._update_reasoning_delta(event["delta"], "RUNNING"))
                     continue
-                if event["type"] == "reasoning_delta":
-                    yield self._sse(
-                        self._update_reasoning_delta(event["delta"], "RUNNING")
-                    )
+                if kind == "content_delta":
+                    markdown += event["delta"]
+                    self.model["content"]["markdown"] = markdown
+                    yield self._sse(self._update_content_delta(event["delta"]))
                     continue
-                if event["type"] in {"tool_call", "tool_result"}:
-                    tool_call_id = event["tool_call_id"]
-                    yield self._sse(
-                        self._update_tool(
-                            tool_call_id,
-                            event["name"],
-                            event["status"],
-                            self._tool_sequence(tool_call_id),
-                            arguments=event.get("arguments"),
-                            result=event.get("result"),
-                        )
+                tool_call_id = event["tool_call_id"]
+                yield self._sse(
+                    self._update_tool(
+                        tool_call_id,
+                        event["name"],
+                        event["status"],
+                        self._tool_sequence(tool_call_id),
+                        arguments=event.get("arguments"),
+                        result=event.get("result"),
                     )
-            analysis = await analysis_task
+                )
         except AnalysisCancelled:
             yield self._sse(self._update("/status", "CANCELLED"))
             return
@@ -170,6 +158,7 @@ class A2UIStream:
         if self._is_cancelled():
             yield self._sse(self._update("/status", "CANCELLED"))
             return
+        analysis = run.as_analysis()
         if analysis["visualization"]["status"] == "PENDING":
             chart_client = McpVisualizationClient()
             chart_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
@@ -219,39 +208,6 @@ class A2UIStream:
                 yield self._sse(self._update("/status", "CANCELLED"))
                 return
             analysis["visualization"] = visualization
-
-        markdown = ""
-        if analysis["requires_clarification"]:
-            markdown = analysis["answer"]
-            self.model["content"]["markdown"] = markdown
-            yield self._sse(self._update_content(markdown))
-        else:
-            try:
-                async for model_event in OpenAICompatibleModel().stream_answer(
-                    self.question, analysis, self.reasoning_enabled, history
-                ):
-                    if self._is_cancelled():
-                        yield self._sse(self._update("/status", "CANCELLED"))
-                        return
-                    if model_event["type"] == "reasoning_delta":
-                        if self.reasoning_enabled:
-                            yield self._sse(
-                                self._update_reasoning_delta(
-                                    model_event["delta"], "RUNNING"
-                                )
-                            )
-                        continue
-                    chunk = model_event["delta"]
-                    markdown += chunk
-                    self.model["content"]["markdown"] = markdown
-                    yield self._sse(self._update_content_delta(chunk))
-                    await asyncio.sleep(0.04)
-            except Exception as exc:  # noqa: BLE001 - expose failure instead of a fake fallback.
-                async for event in self._failure_events(
-                    f"数据查询已完成，但真实模型回答失败（{type(exc).__name__}）。请检查模型服务后重试。"
-                ):
-                    yield event
-                return
 
         self.model["analysis"] = analysis
         yield self._sse(self._update("/analysis", analysis))

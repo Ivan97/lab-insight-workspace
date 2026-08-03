@@ -103,7 +103,7 @@ def _execute_plan(
             "result": {"error": str(exc)},
         })
         raise
-    json_rows = [{key: _to_json_value(value) for key, value in row.items()} for row in rows]
+    json_rows = [{key: to_json_value(value) for key, value in row.items()} for row in rows]
     _emit(event_sink, {
         "type": "tool_result",
         "tool_call_id": query_id,
@@ -119,7 +119,7 @@ def _execute_plan(
     return guarded_sql, json_rows
 
 
-def _to_json_value(value: Any) -> Any:
+def to_json_value(value: Any) -> Any:
     """Convert database-native objects for transport without applying display policy."""
     if isinstance(value, datetime):
         return value.isoformat(timespec="seconds")

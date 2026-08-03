@@ -426,8 +426,10 @@ def test_reasoning_events_complete_at_output_boundaries():
 @pytest.mark.parametrize(
     ("reasoning_enabled", "expected_event_types"),
     [
-        (True, ["reasoning", "tool_group", "content"]),
-        (False, ["tool_group", "content"]),
+        # The agent streams its answer before the chart is rendered, so the
+        # visualization tool call lands after the content rather than before it.
+        (True, ["reasoning", "tool_group", "content", "tool_group"]),
+        (False, ["tool_group", "content", "tool_group"]),
     ],
 )
 async def test_stream_is_ordered_and_completes(
@@ -457,34 +459,27 @@ async def test_stream_is_ordered_and_completes(
 
     observed_history: list = []
     monkeypatch.setattr("backend.app.a2ui.McpVisualizationClient.render", fake_render)
-    def fake_analysis(
-        _question, event_sink, _cancellation_token, thinking_enabled, history
+
+    async def fake_stream_agent(
+        _question, run, cancellation_token=None, thinking_enabled=True, history=None
     ):
         observed_modes.append(thinking_enabled)
         observed_history.append(history)
-        event_sink({"type": "reasoning_delta", "delta": "按供应商聚合测试数量。"})
-        event_sink({
+        # The agent emits reasoning, then the guarded query tool's events, then
+        # the answer. A2UIStream must keep that order and suppress reasoning in
+        # fast mode.
+        yield {"type": "reasoning_delta", "delta": "按供应商聚合测试数量。"}
+        yield {
             "type": "tool_result", "tool_call_id": "duckdb_query:1",
             "name": "DuckDB · execute_query", "status": "COMPLETED",
             "arguments": {"sql": "SELECT 1"}, "result": {"row_count": 1},
-        })
-        return {
-            "answer": "Query completed.",
-            "requires_clarification": False,
-            "table": {"columns": ["vendor", "tests"], "rows": [{"vendor": "A", "tests": 2}], "row_count": 1, "truncated": False},
-            "sql": "SELECT vendor, count(*) AS tests FROM fact_test_results GROUP BY vendor LIMIT 200",
-            "visualization": {"status": "PENDING", "data": [{"vendor": "A", "tests": 2}]},
-            "warnings": [],
         }
-
-    monkeypatch.setattr("backend.app.a2ui.run_analysis", fake_analysis)
-
-    async def fake_answer(self, question, analysis, thinking_enabled, history):
-        observed_modes.append(thinking_enabled)
-        observed_history.append(history)
+        run.sql = "SELECT vendor, count(*) AS tests FROM fact_test_results GROUP BY vendor LIMIT 200"
+        run.rows = [{"vendor": "A", "tests": 2}]
+        run.columns = ["vendor", "tests"]
         yield {"type": "content_delta", "delta": "A has 2 tests."}
 
-    monkeypatch.setattr("backend.app.a2ui.OpenAICompatibleModel.stream_answer", fake_answer)
+    monkeypatch.setattr("backend.app.a2ui.stream_agent", fake_stream_agent)
     with TestClient(app) as client:
         conversation = client.post("/api/v1/conversations").json()
         stream = A2UIStream(
@@ -514,7 +509,8 @@ async def test_stream_is_ordered_and_completes(
     assert tool_event["calls"][0]["arguments"] == {"sql": "SELECT 1"}
     # The first turn has no prior context, but history must still be threaded
     # through both model calls rather than dropped on the way.
-    assert observed_history == [[], []]
+    # First turn has no prior context, but history is still threaded through.
+    assert observed_history == [[]]
     assert content_event["markdown"] == "A has 2 tests."
     with TestClient(app) as client:
         history = client.get(
@@ -523,7 +519,9 @@ async def test_stream_is_ordered_and_completes(
     assert history["total"] == 2
     assert history["items"][-1]["status"] == "COMPLETED"
     assert history["items"][-1]["a2ui_surface_snapshot"]["status"] == "COMPLETED"
-    assert observed_modes == [reasoning_enabled, reasoning_enabled, reasoning_enabled]
+    # Two model call sites now: the agent (planning and answering in one loop)
+    # and the visualization tool selection. Both must honour the toggle.
+    assert observed_modes == [reasoning_enabled, reasoning_enabled]
 
 
 def test_cancel_streaming_message(client: TestClient):
@@ -756,3 +754,65 @@ async def test_visualization_skips_cleanly_when_no_server_is_configured():
     # that simply chose not to draw a chart.
     assert [event["type"] for event in discovery] == ["tool_call", "tool_result"]
     assert discovery[-1]["result"] == {"tool_count": 0, "servers": {}}
+
+
+def test_agent_query_tool_is_the_only_path_to_duckdb():
+    """The pipeline used to guarantee ordering; now the tool must guarantee it."""
+    from backend.app.agent import AnalysisRun, build_query_tool
+
+    run = AnalysisRun()
+    events: list[dict] = []
+    query = build_query_tool(run, events.append, None)
+
+    rejected = query.invoke({"sql": "DROP TABLE fact_test_results"})
+    assert rejected.startswith("REJECTED:")
+    # Rejection is returned, not raised, so the agent can repair and retry.
+    assert run.sql is None and run.rows == []
+    assert [e["status"] for e in events if e["tool_call_id"] == "sql_guard:1"] == [
+        "RUNNING", "FAILED",
+    ]
+
+    assert query.invoke({"sql": "SELECT * FROM read_csv('secret.csv')"}).startswith("REJECTED:")
+    assert query.invoke({"sql": "SELECT * FROM internal_users"}).startswith("REJECTED:")
+
+    ok = query.invoke({"sql": "SELECT vendor, count(*) AS test_count FROM fact_test_results GROUP BY vendor"})
+    assert json.loads(ok)
+    # The guarded AST, not the model's raw string, is what ran and what is shown.
+    assert run.sql.endswith("LIMIT 200")
+    assert "test_count" in run.columns
+    analysis = run.as_analysis()
+    assert analysis["visualization"]["status"] == "PENDING"
+    assert analysis["requires_clarification"] is False
+
+
+def test_skill_tools_are_scoped_and_execute_is_configurable(monkeypatch, tmp_path):
+    """Skills need file reads; the write and execute surface is a deliberate choice."""
+    from backend.app import skills
+
+    monkeypatch.setenv("SKILL_DIR", str(tmp_path))
+    assert skills.discovered_skills() == []
+    # No skills means no filesystem tools at all, rather than idle file access.
+    assert skills.skill_middleware() == []
+
+    skill = tmp_path / "vendor-scorecard"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text(
+        "---\nname: vendor-scorecard\ndescription: Ranks vendors.\n---\n\n# Rules\n"
+    )
+    assert skills.discovered_skills() == ["vendor-scorecard"]
+
+    monkeypatch.setenv("SKILL_EXECUTE_ENABLED", "true")
+    assert skills.execute_enabled() is True
+    assert "execute" in skills.allowed_tool_names()
+    filesystem, skills_mw = skills.skill_middleware()
+    names = {tool.name for tool in filesystem.tools}
+    assert "read_file" in names, "a skill body cannot be loaded without read_file"
+    assert "execute" in names
+    assert skills_mw.sources == ["./"]
+
+    monkeypatch.setenv("SKILL_EXECUTE_ENABLED", "false")
+    assert skills.execute_enabled() is False
+    filesystem, _ = skills.skill_middleware()
+    names = {tool.name for tool in filesystem.tools}
+    assert "execute" not in names
+    assert "read_file" in names
