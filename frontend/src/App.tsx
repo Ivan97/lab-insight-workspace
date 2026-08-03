@@ -89,7 +89,7 @@ export default function App() {
     setSessions((current) => current.map((session) => session.id === sessionId ? { ...session, running } : session))
   }
 
-  const ask = (sessionId: string, value: string, reasoningEnabled = true) => {
+  const ask = (sessionId: string, value: string, reasoningEnabled: boolean) => {
     const question = value.trim()
     if (!question || runningRefs.current.get(sessionId)) return
     runningRefs.current.set(sessionId, true)
@@ -328,37 +328,42 @@ function RelationshipsPanel({ semantic, onPublished }: { semantic: SemanticLayer
   </div>
 }
 
-function AnalyzePage({ sessions, activeSessionId, ask, setRunning }: { sessions: Session[]; activeSessionId: string | null; ask: (sessionId: string, question: string, reasoningEnabled?: boolean) => void; setRunning: (sessionId: string, running: boolean) => void }) {
+function AnalyzePage({ sessions, activeSessionId, ask, setRunning }: { sessions: Session[]; activeSessionId: string | null; ask: (sessionId: string, question: string, reasoningEnabled: boolean) => void; setRunning: (sessionId: string, running: boolean) => void }) {
   const cancelRefs = useRef(new Map<string, () => Promise<void>>())
+  const [reasoningBySession, setReasoningBySession] = useState<Record<string, boolean>>({})
   const suggestions = useMemo(() => [
     'Compare cost, pass rate and turnaround time by vendor',
     'What cost trends or anomalies appeared in recent months?',
     'Which materials have the highest failure rate?',
   ], [])
 
+  // Single source of truth for the composer toggle: suggestion cards and the
+  // composer must send the same reasoning mode for a session.
+  const reasoningFor = (sessionId: string) => reasoningBySession[sessionId] ?? true
+  const setReasoningFor = (sessionId: string, value: boolean) => setReasoningBySession((current) => ({ ...current, [sessionId]: value }))
+
   return <div className="page analyze-page">
     <section className="analyze-hero"><div><span className="eyebrow">ASK & ANALYZE</span><h1>What would you like to understand?</h1><p>Ask across every trusted source. Prism will show its work, use the right tools, and surface the decision—not just the numbers.</p></div></section>
     {sessions.map((session) => <section className="session-workspace" key={session.id} hidden={activeSessionId !== session.id}>
-      {!session.turns.length && <div className="suggestion-grid">{suggestions.map((item, index) => <button key={item} onClick={() => ask(session.id, item)}><span className={`suggestion-icon s${index}`}><LayoutDashboard size={18} /></span><strong>{['Compare vendor performance','Find recent anomalies','Inspect quality risk'][index]}</strong><small>{item}</small><ArrowRight size={16} /></button>)}</div>}
+      {!session.turns.length && <div className="suggestion-grid">{suggestions.map((item, index) => <button key={item} onClick={() => ask(session.id, item, reasoningFor(session.id))}><span className={`suggestion-icon s${index}`}><LayoutDashboard size={18} /></span><strong>{['Compare vendor performance','Find recent anomalies','Inspect quality risk'][index]}</strong><small>{item}</small><ArrowRight size={16} /></button>)}</div>}
       {session.turns.map((turn, index) => <div className="conversation" key={`${index}-${turn.question}`}><div className="user-message">{turn.question}</div><A2UIConversation conversationId={session.id} question={turn.question} reasoningEnabled={turn.reasoningEnabled} onStreamingChange={index === session.turns.length - 1 ? (running) => setRunning(session.id, running) : undefined} onCancelReady={index === session.turns.length - 1 ? (cancel) => { if (cancel) cancelRefs.current.set(session.id, cancel); else cancelRefs.current.delete(session.id) } : undefined} /></div>)}
-      <QuestionComposer running={session.running} onSubmit={(question, reasoningEnabled) => ask(session.id, question, reasoningEnabled)} onStop={() => void cancelRefs.current.get(session.id)?.()} />
+      <QuestionComposer running={session.running} reasoningEnabled={reasoningFor(session.id)} onReasoningChange={(value) => setReasoningFor(session.id, value)} onSubmit={(question) => ask(session.id, question, reasoningFor(session.id))} onStop={() => void cancelRefs.current.get(session.id)?.()} />
     </section>)}
     {!sessions.length && <div className="assistant-loading"><i /><span>Preparing your first conversation…</span></div>}
   </div>
 }
 
-function QuestionComposer({ running, onSubmit, onStop }: { running: boolean; onSubmit: (question: string, reasoningEnabled: boolean) => void; onStop: () => void }) {
+function QuestionComposer({ running, reasoningEnabled, onReasoningChange, onSubmit, onStop }: { running: boolean; reasoningEnabled: boolean; onReasoningChange: (reasoningEnabled: boolean) => void; onSubmit: (question: string) => void; onStop: () => void }) {
   const [draft, setDraft] = useState('')
-  const [reasoningEnabled, setReasoningEnabled] = useState(true)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const composingRef = useRef(false)
   const submit = () => {
     const value = draft.trim()
     if (running || !value) return
-    onSubmit(value, reasoningEnabled)
+    onSubmit(value)
     setDraft('')
     window.requestAnimationFrame(() => inputRef.current?.focus())
   }
   useEffect(() => { if (!running) inputRef.current?.focus() }, [running])
-  return <div className="composer-wrap"><form className={`composer ${running ? 'running stop-mode' : ''}`} onSubmit={(event) => { event.preventDefault(); submit() }}><Sparkles size={18} /><textarea ref={inputRef} rows={1} value={draft} placeholder={running ? 'Prepare your next question while this response runs…' : 'Ask a question about the published data…'} onChange={(event) => setDraft(event.target.value)} onCompositionStart={() => { composingRef.current = true }} onCompositionEnd={() => { composingRef.current = false }} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing && !composingRef.current) { event.preventDefault(); submit() } }} aria-label="Ask a question" /><button type={running ? 'button' : 'submit'} disabled={!running && !draft.trim()} onClick={running ? onStop : undefined} aria-label={running ? 'Stop response' : 'Send question'} title={running ? 'Stop response' : 'Send question'}>{running ? <Square size={13} fill="currentColor" /> : <ArrowRight size={18} />}</button></form><div className="composer-footer"><label className={`reasoning-toggle ${running ? 'locked' : ''}`}><BrainCircuit size={13} /><span>{running ? (reasoningEnabled ? '本轮思考模式' : '本轮快速模式') : '思考模式'}</span><input type="checkbox" checked={reasoningEnabled} disabled={running} onChange={(event) => setReasoningEnabled(event.target.checked)} /><i aria-hidden="true" /></label><span>{running ? 'You can keep typing. Stop the current response or wait for it to finish before sending.' : 'Answers use published data only. SQL and metric definitions remain available for review.'}</span></div></div>
+  return <div className="composer-wrap"><form className={`composer ${running ? 'running stop-mode' : ''}`} onSubmit={(event) => { event.preventDefault(); submit() }}><Sparkles size={18} /><textarea ref={inputRef} rows={1} value={draft} placeholder={running ? 'Prepare your next question while this response runs…' : 'Ask a question about the published data…'} onChange={(event) => setDraft(event.target.value)} onCompositionStart={() => { composingRef.current = true }} onCompositionEnd={() => { composingRef.current = false }} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing && !composingRef.current) { event.preventDefault(); submit() } }} aria-label="Ask a question" /><button type={running ? 'button' : 'submit'} disabled={!running && !draft.trim()} onClick={running ? onStop : undefined} aria-label={running ? 'Stop response' : 'Send question'} title={running ? 'Stop response' : 'Send question'}>{running ? <Square size={13} fill="currentColor" /> : <ArrowRight size={18} />}</button></form><div className="composer-footer"><label className={`reasoning-toggle ${running ? 'locked' : ''}`}><BrainCircuit size={13} /><span>{running ? (reasoningEnabled ? '本轮思考模式' : '本轮快速模式') : '思考模式'}</span><input type="checkbox" checked={reasoningEnabled} disabled={running} onChange={(event) => onReasoningChange(event.target.checked)} /><i aria-hidden="true" /></label><span>{running ? 'You can keep typing. Stop the current response or wait for it to finish before sending.' : 'Answers use published data only. SQL and metric definitions remain available for review.'}</span></div></div>
 }
