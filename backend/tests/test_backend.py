@@ -271,6 +271,22 @@ def test_agent_events_preserve_interleaved_order():
     ]
 
 
+def test_reasoning_events_complete_at_output_boundaries():
+    stream = A2UIStream("conversation", "question")
+    stream._update_reasoning_delta("Plan the query.", "RUNNING")
+    assert stream.model["events"][-1]["status"] == "RUNNING"
+
+    stream._update_tool("query", "DuckDB · execute_query", "RUNNING", 1)
+    first_reasoning = stream.model["events"][0]
+    assert first_reasoning["status"] == "COMPLETED"
+
+    stream._update_reasoning_delta("Interpret the result.", "RUNNING")
+    assert stream.model["events"][-1]["status"] == "RUNNING"
+    stream._update_content_delta("The result is ready.")
+    second_reasoning = stream.model["events"][-2]
+    assert second_reasoning["status"] == "COMPLETED"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("reasoning_enabled", "expected_event_types"),

@@ -272,6 +272,7 @@ class A2UIStream:
         arguments: dict[str, Any] | None = None,
         result: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        self._complete_active_reasoning()
         group = self.model["toolGroups"].setdefault(
             "analysis", {"groupId": "analysis", "calls": []}
         )
@@ -309,11 +310,13 @@ class A2UIStream:
         return self._update("/events", events)
 
     def _update_content(self, markdown: str) -> dict[str, Any]:
+        self._complete_active_reasoning()
         events = self.model["events"]
         events.append({"id": str(uuid.uuid4()), "type": "content", "markdown": markdown})
         return self._update("/events", events)
 
     def _update_content_delta(self, chunk: str) -> dict[str, Any]:
+        self._complete_active_reasoning()
         events = self.model["events"]
         if events and events[-1]["type"] == "content":
             events[-1]["markdown"] += chunk
@@ -326,6 +329,11 @@ class A2UIStream:
             if event["type"] == "reasoning" and event["status"] == "RUNNING":
                 event["status"] = status
         return self._update("/events", self.model["events"])
+
+    def _complete_active_reasoning(self) -> None:
+        events = self.model["events"]
+        if events and events[-1]["type"] == "reasoning" and events[-1]["status"] == "RUNNING":
+            events[-1]["status"] = "COMPLETED"
 
     def _tool_sequence(self, tool_call_id: str) -> int:
         if tool_call_id not in self.tool_sequences:

@@ -30,18 +30,19 @@ const EventStreamApi = { name: 'AgentEventStream', schema: z.object({ events: Co
 const AnalysisApi = { name: 'AnalysisResult', schema: z.object({ analysis: CommonSchemas.DynamicValue, artifacts: CommonSchemas.DynamicValue }) }
 
 function ReasoningView({ segments, status }: { segments: ReasoningSegment[]; status: string }) {
-  const [expanded, setExpanded] = useState(false)
+  const [expanded, setExpanded] = useState(status === 'RUNNING')
   const [manuallyExpanded, setManuallyExpanded] = useState(false)
-  const previousStatus = useRef(status)
+  const previousStatus = useRef('IDLE')
   const contentRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    if (status === 'RUNNING' && previousStatus.current !== 'RUNNING') setExpanded(true)
-    if ((status === 'COMPLETED' || status === 'CANCELLED') && !manuallyExpanded) {
+    const wasRunning = previousStatus.current === 'RUNNING'
+    previousStatus.current = status
+    if (status === 'RUNNING' && !wasRunning) setExpanded(true)
+    if ((status === 'COMPLETED' || status === 'CANCELLED') && wasRunning && !manuallyExpanded) {
       const timer = window.setTimeout(() => setExpanded(false), 300)
       return () => window.clearTimeout(timer)
     }
-    previousStatus.current = status
   }, [status, manuallyExpanded])
 
   useEffect(() => {
