@@ -954,3 +954,49 @@ def test_registry_field_meaning_is_editable_but_identity_is_not(client: TestClie
         "/api/v1/schema/registry/fact_test_results/turnaround_days",
         json={"description": "Days between submission and completion.", "unit": "days"},
     )
+
+
+@pytest.mark.asyncio
+async def test_mcp_operations_retry_transient_failures(monkeypatch):
+    """Starting a stdio server shells out to npx, which fails transiently."""
+    from backend.app import mcp_chart
+
+    monkeypatch.setattr(mcp_chart, "RETRY_BACKOFF_SECONDS", 0)
+    monkeypatch.delenv("MCP_RETRY_ATTEMPTS", raising=False)
+    assert mcp_chart.retry_attempts() == 3
+
+    calls = {"n": 0}
+
+    async def flaky():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise OSError("npx not ready")
+        return "listed"
+
+    # Recovers within the default three attempts.
+    assert await mcp_chart.with_retry("probe", flaky) == "listed"
+    assert calls["n"] == 3
+
+    calls["n"] = 0
+
+    async def always_fails():
+        calls["n"] += 1
+        raise OSError("npx missing")
+
+    # Gives up after the configured count and re-raises the last failure.
+    with pytest.raises(OSError, match="npx missing"):
+        await mcp_chart.with_retry("probe", always_fails)
+    assert calls["n"] == 3
+
+    monkeypatch.setenv("MCP_RETRY_ATTEMPTS", "1")
+    calls["n"] = 0
+    with pytest.raises(OSError):
+        await mcp_chart.with_retry("probe", always_fails)
+    assert calls["n"] == 1, "a count of 1 means no retry, not one retry"
+
+    monkeypatch.setenv("MCP_RETRY_ATTEMPTS", "0")
+    with pytest.raises(ValueError, match="at least 1"):
+        mcp_chart.retry_attempts()
+    monkeypatch.setenv("MCP_RETRY_ATTEMPTS", "three")
+    with pytest.raises(ValueError, match="must be an integer"):
+        mcp_chart.retry_attempts()

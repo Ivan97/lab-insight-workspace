@@ -1,7 +1,8 @@
 import asyncio
 import hashlib
 import logging
-from collections.abc import Callable
+import os
+from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from typing import Any
@@ -16,6 +17,46 @@ from .mcp_config import McpServer, McpTransport, enabled_servers
 from .model_client import OpenAICompatibleModel
 
 logger = logging.getLogger("prism.mcp")
+
+DEFAULT_RETRY_ATTEMPTS = 3
+RETRY_BACKOFF_SECONDS = 0.5
+
+
+def retry_attempts() -> int:
+    """How many times a failing MCP operation is tried in total."""
+    raw = os.getenv("MCP_RETRY_ATTEMPTS")
+    if raw is None or not raw.strip():
+        return DEFAULT_RETRY_ATTEMPTS
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValueError(f"MCP_RETRY_ATTEMPTS={raw!r} must be an integer") from None
+    if value < 1:
+        raise ValueError(f"MCP_RETRY_ATTEMPTS={value} must be at least 1")
+    return value
+
+
+async def with_retry(label: str, operation: Callable[[], Awaitable[Any]]) -> Any:
+    """Retry a flaky MCP operation.
+
+    Starting a stdio server shells out to npx, which fails transiently often
+    enough that one bad attempt should not disable charts for the whole run.
+    Backoff is linear because these are process starts, not rate limits.
+    """
+    attempts = retry_attempts()
+    last: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return await operation()
+        except Exception as exc:  # noqa: BLE001 - the last failure is re-raised below.
+            last = exc
+            logger.warning(
+                "%s failed attempt=%s/%s: %s", label, attempt, attempts, exc
+            )
+            if attempt < attempts:
+                await asyncio.sleep(RETRY_BACKOFF_SECONDS * attempt)
+    assert last is not None
+    raise last
 
 ChartEventSink = Callable[[dict[str, Any]], None]
 
@@ -64,33 +105,37 @@ _CACHE_LOCK = asyncio.Lock()
 async def discover_tools(
     servers: list[McpServer],
 ) -> tuple[dict[str, DiscoveredTool], dict[str, Any]]:
-    """Connect to each server once and collect its tool schemas."""
+    """Connect to each server and collect its tool schemas, retrying transients."""
     tools: dict[str, DiscoveredTool] = {}
     report: dict[str, Any] = {}
     for server in servers:
-        try:
+
+        async def list_for(server: McpServer = server) -> Any:
             async with AsyncExitStack() as stack:
                 session = await _open_session(stack, server)
-                discovered = await session.list_tools()
-                for tool in discovered.tools:
-                    if tool.name in tools:
-                        raise ValueError(
-                            f"Tool {tool.name!r} is exposed by both "
-                            f"{tools[tool.name].server.name!r} and {server.name!r}. "
-                            "Disable one of them in mcp.json."
-                        )
-                    tools[tool.name] = DiscoveredTool(
-                        server=server,
-                        schema={
-                            "type": "function",
-                            "function": {
-                                "name": tool.name,
-                                "description": tool.description or "",
-                                "parameters": tool.inputSchema,
-                            },
-                        },
+                return await session.list_tools()
+
+        try:
+            discovered = await with_retry(f"mcp {server.name} tools/list", list_for)
+            for tool in discovered.tools:
+                if tool.name in tools:
+                    raise ValueError(
+                        f"Tool {tool.name!r} is exposed by both "
+                        f"{tools[tool.name].server.name!r} and {server.name!r}. "
+                        "Disable one of them in mcp.json."
                     )
-                report[server.name] = {"tool_count": len(discovered.tools)}
+                tools[tool.name] = DiscoveredTool(
+                    server=server,
+                    schema={
+                        "type": "function",
+                        "function": {
+                            "name": tool.name,
+                            "description": tool.description or "",
+                            "parameters": tool.inputSchema,
+                        },
+                    },
+                )
+            report[server.name] = {"tool_count": len(discovered.tools)}
         except Exception as exc:  # noqa: BLE001 - one bad server must not hide the rest.
             logger.warning("mcp server %s unavailable: %s", server.name, exc)
             report[server.name] = {"error": f"{type(exc).__name__}: {exc}"}
@@ -201,9 +246,12 @@ class McpVisualizationClient:
                 "arguments": selected.arguments,
             })
             # Only the server that owns the tool is started.
-            async with AsyncExitStack() as stack:
-                session = await _open_session(stack, chosen.server)
-                result = await session.call_tool(selected.name, selected.arguments)
+            async def call_selected() -> Any:
+                async with AsyncExitStack() as stack:
+                    session = await _open_session(stack, chosen.server)
+                    return await session.call_tool(selected.name, selected.arguments)
+
+            result = await with_retry(f"mcp {selected_label}", call_selected)
             remote_url = self._extract_url(result.content)
             image_url = (
                 await self._cache_asset(remote_url, chosen.asset_hosts) if remote_url else None
