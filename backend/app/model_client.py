@@ -7,7 +7,7 @@ from typing import Any
 import httpx
 
 from .config import ROOT_DIR  # noqa: F401 - importing config loads local runtime settings.
-from .model_runtime import apply_thinking_mode
+from .model_runtime import apply_thinking_mode, reasoning_from_delta
 from .text_to_sql import ModelConfigurationError, ModelRequestError
 
 ANSWER_SYSTEM_PROMPT = """You are a careful internal data analyst.
@@ -85,7 +85,7 @@ class OpenAICompatibleModel:
                     if not data or data == "[DONE]":
                         continue
                     delta = json.loads(data)["choices"][0].get("delta", {})
-                    reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+                    reasoning = reasoning_from_delta(delta)
                     if reasoning:
                         yield {"type": "reasoning_delta", "delta": str(reasoning)}
                     content = delta.get("content")
@@ -142,7 +142,7 @@ class OpenAICompatibleModel:
                     if not data or data == "[DONE]":
                         continue
                     delta = json.loads(data)["choices"][0].get("delta", {})
-                    reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+                    reasoning = reasoning_from_delta(delta)
                     if reasoning and reasoning_sink:
                         reasoning_sink(str(reasoning))
                     for tool_delta in delta.get("tool_calls") or []:

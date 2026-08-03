@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 import httpx
 
 from .config import ROOT_DIR  # noqa: F401 - importing config loads local runtime settings.
-from .model_runtime import apply_thinking_mode
+from .model_runtime import apply_thinking_mode, reasoning_from_delta
 from .semantic import semantic_prompt_context
 
 SYSTEM_PROMPT = """You are the Text-to-SQL planner for an internal laboratory analytics product.
@@ -128,7 +128,7 @@ class TextToSQLPlanner:
                     if not data or data == "[DONE]":
                         continue
                     delta = json.loads(data)["choices"][0].get("delta", {})
-                    reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+                    reasoning = reasoning_from_delta(delta)
                     if reasoning and reasoning_sink:
                         reasoning_sink(str(reasoning))
                     content = delta.get("content")

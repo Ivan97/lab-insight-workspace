@@ -18,7 +18,7 @@ from backend.app.model_client import (
     VISUALIZATION_SYSTEM_PROMPT,
     OpenAICompatibleModel,
 )
-from backend.app.model_runtime import apply_thinking_mode
+from backend.app.model_runtime import apply_thinking_mode, reasoning_from_delta
 from backend.app.semantic import semantic_prompt_context
 from backend.app.sql_guard import SQLGuardError, guard_sql
 from backend.app.text_to_sql import SYSTEM_PROMPT, GeneratedPlan, ModelConfigurationError
@@ -175,12 +175,54 @@ def test_deepseek_thinking_mode_changes_provider_payload(monkeypatch):
     thinking = apply_thinking_mode({"stream": True}, True)
     assert thinking["model"] == "deepseek-v4-pro"
     assert thinking["thinking"] == {"type": "enabled"}
+    # The live API validates reasoning_effort at the top level and ignores the
+    # same key nested inside `thinking`, so placement is load-bearing.
     assert thinking["reasoning_effort"] == "max"
+    assert "reasoning_effort" not in thinking["thinking"]
 
     direct = apply_thinking_mode({"stream": True}, False)
     assert direct["model"] == "deepseek-v4-flash"
     assert direct["thinking"] == {"type": "disabled"}
     assert "reasoning_effort" not in direct
+
+
+def test_gemini_dialect_translates_the_same_toggle(monkeypatch):
+    """Swapping providers must stay a configuration change."""
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    monkeypatch.setenv("LLM_MODEL", "gemini-3-pro")
+    monkeypatch.delenv("LLM_THINKING_MODEL", raising=False)
+    monkeypatch.delenv("LLM_NON_THINKING_MODEL", raising=False)
+    # `xhigh` has no Gemini equivalent and is translated, not rejected.
+    monkeypatch.setenv("LLM_REASONING_EFFORT", "xhigh")
+
+    thinking = apply_thinking_mode({"stream": True}, True)
+    assert thinking["model"] == "gemini-3-pro"
+    assert thinking["reasoning_effort"] == "high"
+    assert "thinking" not in thinking
+
+    direct = apply_thinking_mode({"stream": True}, False)
+    assert direct["reasoning_effort"] == "none"
+    assert direct["google"] == {"thinking_config": {"thinking_budget": 0}}
+
+
+def test_unsupported_runtime_settings_fail_loudly(monkeypatch):
+    """A silently dropped setting is how LLM_REASONING_EFFORT became a no-op."""
+    monkeypatch.setenv("LLM_PROVIDER", "deepseek")
+    monkeypatch.setenv("LLM_REASONING_EFFORT", "hgih")
+    with pytest.raises(ValueError, match="LLM_REASONING_EFFORT"):
+        apply_thinking_mode({"stream": True}, True)
+
+    monkeypatch.setenv("LLM_REASONING_EFFORT", "high")
+    monkeypatch.setenv("LLM_PROVIDER", "deepsekk")
+    with pytest.raises(ValueError, match="LLM_PROVIDER"):
+        apply_thinking_mode({"stream": True}, True)
+
+
+def test_reasoning_is_read_through_the_provider_dialect(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "deepseek")
+    assert reasoning_from_delta({"reasoning_content": "step"}) == "step"
+    assert reasoning_from_delta({"reasoning": "step"}) == "step"
+    assert reasoning_from_delta({"content": "answer"}) is None
 
 
 def test_other_openai_compatible_providers_switch_models_without_deepseek_fields(
