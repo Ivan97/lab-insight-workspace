@@ -56,13 +56,6 @@ const navigation = [
   { id: 'analyze' as const, label: 'Analyze', icon: ChartNoAxesCombined },
 ]
 
-const canonicalFields = [
-  'sample_id', 'vendor', 'project', 'material', 'test_name', 'result', 'cost_amount',
-  'completed_date', 'lab_vendor', 'contract_tier', 'region', 'contracted_cost_usd',
-  'sla_days', 'quality_target_pct', 'owner', 'priority', 'approved_budget_usd',
-  'start_date', 'end_date',
-  'material_family', 'target_failure_pct', 'max_avg_cost_usd', 'risk_tier',
-]
 
 export default function App() {
   const [page, setPage] = useState<Page>('sources')
@@ -275,6 +268,10 @@ function SchemaPage({ sources, batchId, onSelectBatch, onCommitted, onAnalyze }:
   const [reviewTab, setReviewTab] = useState<'profile' | 'preview'>('profile')
   const [schemaMode, setSchemaMode] = useState<'fields' | 'relationships'>('fields')
   const [semantic, setSemantic] = useState<SemanticLayer | null>(null)
+  // Mapping targets come from the registry. They used to be a literal in this
+  // file, which is how the dropdown came to offer fields that do not exist.
+  const [canonicalFields, setCanonicalFields] = useState<string[]>([])
+  useEffect(() => { void api.getCanonicalFields().then((value) => setCanonicalFields(value.items)) }, [])
   // Sources still awaiting review come first, so the work to do is not buried
   // behind files that are already published. Array.sort is stable, so the
   // original order survives inside each group.

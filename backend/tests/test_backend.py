@@ -898,3 +898,59 @@ def test_logs_rotate_and_stay_bounded(tmp_path, monkeypatch):
     monkeypatch.setenv("LOG_MAX_BYTES", "0")
     with pytest.raises(ValueError, match="LOG_MAX_BYTES"):
         logging_config.max_bytes()
+
+
+def test_registry_is_seeded_from_the_real_tables(client: TestClient):
+    """The dropdown offered sample_id, cost_amount and lab_vendor, none of which
+    exist, while omitting six columns that do. Seeding from DESCRIBE makes that
+    class of drift unrepresentable."""
+    registry = client.get("/api/v1/schema/registry").json()
+    entities = {item["entity"]: item for item in registry["entities"]}
+    assert set(entities) == {
+        "fact_test_results", "dim_vendor_contracts",
+        "dim_project_budgets", "dim_material_standards",
+    }
+    assert entities["fact_test_results"]["role"] == "FACT"
+    assert entities["dim_vendor_contracts"]["role"] == "DIMENSION"
+
+    offered = set(client.get("/api/v1/schema/canonical-fields").json()["items"])
+    real = {
+        column
+        for table in client.get("/api/v1/schema/relationships").json()["tables"]
+        for column in table["columns"]
+    }
+    assert offered == real, "a mapping target that does not exist is the original bug"
+
+    cost = next(f for f in entities["fact_test_results"]["fields"] if f["field"] == "cost_usd")
+    # A field carries meaning, not just a name and a type.
+    assert cost["description"] and cost["unit"] == "USD"
+    assert cost["result_format"] == "CURRENCY_USD"
+    result = next(f for f in entities["fact_test_results"]["fields"] if f["field"] == "result")
+    assert result["enum_values"] == ["PASS", "FAIL"]
+
+
+def test_registry_field_meaning_is_editable_but_identity_is_not(client: TestClient):
+    from backend.app.registry import registry_prompt_context
+
+    patched = client.patch(
+        "/api/v1/schema/registry/fact_test_results/turnaround_days",
+        json={"description": "Working days from submission to report.", "unit": "working days"},
+    )
+    assert patched.status_code == 200
+    assert patched.json()["unit"] == "working days"
+    # The prompt reads the registry, so an edit reaches Text-to-SQL.
+    assert "Working days from submission to report." in registry_prompt_context()
+
+    rejected = client.patch(
+        "/api/v1/schema/registry/fact_test_results/turnaround_days",
+        json={"result_format": "FURLONGS"},
+    )
+    assert rejected.status_code == 422 and "result_format" in rejected.text
+
+    unknown = client.patch("/api/v1/schema/registry/fact_test_results/nope", json={"unit": "x"})
+    assert unknown.status_code == 422 and "Unknown field" in unknown.text
+
+    client.patch(
+        "/api/v1/schema/registry/fact_test_results/turnaround_days",
+        json={"description": "Days between submission and completion.", "unit": "days"},
+    )

@@ -83,3 +83,13 @@ class A2UIActionRequest(BaseModel):
     action_id: str
     name: str
     context: dict[str, Any] = Field(default_factory=dict)
+
+
+class CanonicalFieldPatch(BaseModel):
+    """Only meaning is editable. Identifier and type belong to the physical
+    table; letting those drift is the bug the registry exists to prevent."""
+
+    display_name: str | None = Field(default=None, min_length=1, max_length=120)
+    description: str | None = Field(default=None, max_length=500)
+    result_format: str | None = None
+    unit: str | None = Field(default=None, max_length=32)

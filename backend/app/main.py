@@ -22,8 +22,16 @@ from .mcp_chart import prime_tool_cache
 from .mcp_config import config_path, load_servers
 from .model_runtime import current_provider
 from .profiling import preview_frame, profile_frame, profile_text
+from .registry import (
+    RegistryError,
+    canonical_field_names,
+    get_registry,
+    initialize_registry,
+    update_field,
+)
 from .schemas import (
     A2UIActionRequest,
+    CanonicalFieldPatch,
     Conversation,
     CreateMessageRequest,
     IngestionBatch,
@@ -49,6 +57,7 @@ async def lifespan(_: FastAPI):
     init_schema()
     initialize_demo()
     initialize_semantic_layer()
+    initialize_registry()
     # Warms the MCP tool schemas so the first chart does not pay discovery, and
     # so the model can pick a tool before any server is started. Never fatal.
     app.state.mcp_discovery = await prime_tool_cache()
@@ -293,6 +302,25 @@ def commit_ingestion(batch_id: str):
             [utcnow(), batch_id],
         )
     return get_ingestion(batch_id)
+
+
+@app.get("/api/v1/schema/registry")
+def schema_registry() -> dict:
+    return get_registry()
+
+
+@app.get("/api/v1/schema/canonical-fields")
+def schema_canonical_fields() -> dict:
+    """Mapping targets. The dropdown reads this instead of a hardcoded array."""
+    return {"items": canonical_field_names()}
+
+
+@app.patch("/api/v1/schema/registry/{entity}/{field}")
+def patch_canonical_field(entity: str, field: str, patch: CanonicalFieldPatch) -> dict:
+    try:
+        return update_field(entity, field, patch.model_dump(exclude_unset=True))
+    except RegistryError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 @app.get("/api/v1/schema/relationships")
