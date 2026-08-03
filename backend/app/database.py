@@ -1,3 +1,4 @@
+import atexit
 import json
 import threading
 from collections.abc import Iterator
@@ -9,17 +10,54 @@ import duckdb
 
 from .config import DATABASE_PATH
 
-_lock = threading.RLock()
+
+class _FairLock:
+    """Serialize DuckDB connections without starving queued request threads."""
+
+    def __init__(self) -> None:
+        self._condition = threading.Condition()
+        self._next_ticket = 0
+        self._serving_ticket = 0
+
+    def __enter__(self) -> None:
+        with self._condition:
+            ticket = self._next_ticket
+            self._next_ticket += 1
+            while ticket != self._serving_ticket:
+                self._condition.wait()
+
+    def __exit__(self, *_: object) -> None:
+        with self._condition:
+            self._serving_ticket += 1
+            self._condition.notify_all()
+
+
+_lock = _FairLock()
+_database_connection: duckdb.DuckDBPyConnection | None = None
+
+
+def _get_connection() -> duckdb.DuckDBPyConnection:
+    global _database_connection
+    if _database_connection is None:
+        _database_connection = duckdb.connect(str(DATABASE_PATH))
+    return _database_connection
+
+
+def _close_connection() -> None:
+    global _database_connection
+    with _lock:
+        if _database_connection is not None:
+            _database_connection.close()
+            _database_connection = None
+
+
+atexit.register(_close_connection)
 
 
 @contextmanager
 def connection() -> Iterator[duckdb.DuckDBPyConnection]:
     with _lock:
-        conn = duckdb.connect(str(DATABASE_PATH))
-        try:
-            yield conn
-        finally:
-            conn.close()
+        yield _get_connection()
 
 
 def init_schema() -> None:

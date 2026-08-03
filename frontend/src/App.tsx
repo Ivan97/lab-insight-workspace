@@ -49,7 +49,6 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [sessions, setSessions] = useState<Session[]>([])
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
-  const [creatingSession, setCreatingSession] = useState(false)
   const runningRefs = useRef(new Map<string, boolean>())
   const initializedSessionRef = useRef(false)
 
@@ -74,16 +73,14 @@ export default function App() {
   }, [])
 
   const createSession = async () => {
-    if (creatingSession) return
-    setCreatingSession(true)
     try {
       const value = await api.createConversation()
       const session = { id: value.conversation_id, title: 'New analysis', turns: [], running: false }
       setSessions((current) => [...current, session])
       setActiveSessionId(session.id)
       setPage('analyze')
-    } finally {
-      setCreatingSession(false)
+    } catch (reason) {
+      console.error('Unable to create conversation', reason)
     }
   }
 
@@ -122,7 +119,7 @@ export default function App() {
                   <Icon size={18} /><span>{item.label}</span>
                 </button>
                 {item.id === 'analyze' && page === 'analyze' && <section className="conversation-subnav" aria-label="Analysis conversations">
-                  <div className="conversation-subnav-head"><span>Conversations</span><button onClick={() => void createSession()} disabled={creatingSession} aria-label="New conversation" title="New conversation"><Plus size={14} /></button></div>
+                  <div className="conversation-subnav-head"><span>Conversations</span><button onClick={() => void createSession()} aria-label="New conversation" title="New conversation"><Plus size={14} /></button></div>
                   <div className="conversation-subtabs">
                     {sessions.map((session, index) => <button key={session.id} className={activeSessionId === session.id ? 'active' : ''} onClick={() => setActiveSessionId(session.id)}>
                       <span className={session.running ? 'session-state running' : 'session-state'} />
