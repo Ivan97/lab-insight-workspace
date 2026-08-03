@@ -10,7 +10,7 @@ from .cancellation import AnalysisCancelled, CancellationToken
 from .config import CATALOG_ID
 from .conversation import recent_messages
 from .database import connection, json_dumps, utcnow
-from .mcp_chart import AntVChartClient
+from .mcp_chart import McpVisualizationClient
 from .model_client import OpenAICompatibleModel
 
 COMPONENTS = [
@@ -171,7 +171,7 @@ class A2UIStream:
             yield self._sse(self._update("/status", "CANCELLED"))
             return
         if analysis["visualization"]["status"] == "PENDING":
-            chart_client = AntVChartClient()
+            chart_client = McpVisualizationClient()
             chart_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
 
             def receive_chart_event(event: dict[str, Any]) -> None:

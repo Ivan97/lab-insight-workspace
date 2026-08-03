@@ -15,6 +15,7 @@ from .cancellation import cancel_active, register_cancellation, unregister_cance
 from .config import ARTIFACT_DIR, CATALOG_ID, DEMO_SOURCE_DIR, FRONTEND_DIST
 from .database import connection, init_schema, json_dumps, rows_as_dicts, utcnow
 from .demo_data import default_mappings, initialize_demo
+from .mcp_config import config_path, load_servers
 from .profiling import preview_frame, profile_frame, profile_text
 from .schemas import (
     A2UIActionRequest,
@@ -63,8 +64,8 @@ def health() -> dict:
         },
         "visualization_mcp": {
             "status": "on-demand",
-            "transport": "stdio",
-            "command": ["npx", "-y", "@antv/mcp-server-chart"],
+            "config_path": str(config_path()),
+            "servers": [server.describe() for server in load_servers()],
         },
     }
 

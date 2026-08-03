@@ -13,7 +13,13 @@ from backend.app.cancellation import (
 )
 from backend.app.database import connection, json_dumps, utcnow
 from backend.app.main import app
-from backend.app.mcp_chart import AntVChartClient
+from backend.app.mcp_chart import McpVisualizationClient
+from backend.app.mcp_config import (
+    McpConfigError,
+    McpTransport,
+    enabled_servers,
+    load_servers,
+)
 from backend.app.model_client import (
     ANSWER_SYSTEM_PROMPT,
     VISUALIZATION_SYSTEM_PROMPT,
@@ -164,17 +170,72 @@ def test_visualization_is_selected_from_runtime_tools_not_planner_rules():
     assert "selected tool's JSON Schema" in VISUALIZATION_SYSTEM_PROMPT
 
 
-def test_visualization_mcp_uses_on_demand_npx_stdio(client: TestClient):
-    chart_client = AntVChartClient()
-    assert chart_client.server.command == "npx"
-    assert chart_client.server.args == ["-y", "@antv/mcp-server-chart"]
+def test_visualization_mcp_comes_from_the_config_file(client: TestClient):
+    """The shipped AntV server must be declared in mcp.json, not in code."""
+    servers = enabled_servers()
+    antv = next(server for server in servers if server.name == "antv-chart")
+    assert antv.transport is McpTransport.STDIO
+    assert [antv.command, *antv.args] == ["npx", "-y", "@antv/mcp-server-chart"]
+    # The SSRF allowlist travels with the server declaration.
+    assert antv.asset_hosts == ("mdn.alipayobjects.com",)
+
+    assert McpVisualizationClient().servers == servers
 
     visualization = client.get("/api/v1/health").json()["visualization_mcp"]
-    assert visualization == {
-        "status": "on-demand",
-        "transport": "stdio",
-        "command": ["npx", "-y", "@antv/mcp-server-chart"],
-    }
+    assert visualization["status"] == "on-demand"
+    assert visualization["config_path"].endswith("mcp.json")
+    assert visualization["servers"] == [server.describe() for server in load_servers()]
+
+
+def test_mcp_config_is_parsed_validated_and_expanded(tmp_path, monkeypatch):
+    monkeypatch.setenv("CHART_TOKEN", "s3cret")
+    config = tmp_path / "mcp.json"
+    config.write_text(json.dumps({
+        "mcpServers": {
+            # transport omitted: inferred from the entry shape.
+            "local": {
+                "command": "npx",
+                "args": ["-y", "server", "--key=${CHART_TOKEN}"],
+                "env": {"TOKEN": "${CHART_TOKEN}"},
+                "assetHosts": ["Cdn.Example.COM"],
+            },
+            "remote": {"url": "https://tools.example.com/mcp", "headers": {"X-Key": "${CHART_TOKEN}"}},
+            "parked": {"command": "noop", "enabled": False},
+        }
+    }))
+    local, remote, parked = load_servers(config)
+
+    assert local.transport is McpTransport.STDIO
+    # Secrets stay in the environment; the committed file only references them.
+    assert local.args == ["-y", "server", "--key=s3cret"]
+    assert local.env == {"TOKEN": "s3cret"}
+    assert local.asset_hosts == ("cdn.example.com",)
+    assert remote.transport is McpTransport.HTTP
+    assert remote.url == "https://tools.example.com/mcp"
+    assert remote.headers == {"X-Key": "s3cret"}
+    assert parked.enabled is False
+    assert [server.name for server in enabled_servers(config)] == ["local", "remote"]
+    # Header values may be tokens and must not reach the health endpoint.
+    assert "s3cret" not in json.dumps(remote.describe())
+
+    missing = tmp_path / "absent.json"
+    assert load_servers(missing) == []
+
+    for broken, expected in [
+        ({"mcpServers": {"x": {"transport": "carrier-pigeon", "command": "a"}}}, "transport="),
+        ({"mcpServers": {"x": {}}}, "requires a command"),
+        ({"mcpServers": {"x": {"url": "https://a", "headers": {"k": 1}}}}, "map of strings"),
+        ({"mcpServers": {"x": {"command": "a", "assetHosts": "nope"}}}, "list of hostnames"),
+        ({"mcpServers": {"x": {"command": "a", "enabled": "yes"}}}, "true or false"),
+        ({"servers": {}}, "'mcpServers'"),
+    ]:
+        config.write_text(json.dumps(broken))
+        with pytest.raises(McpConfigError, match=expected):
+            load_servers(config)
+
+    config.write_text("{not json")
+    with pytest.raises(McpConfigError, match="not valid JSON"):
+        load_servers(config)
 
 
 def test_deepseek_thinking_body_matches_the_live_api(monkeypatch):
@@ -395,7 +456,7 @@ async def test_stream_is_ordered_and_completes(
         }
 
     observed_history: list = []
-    monkeypatch.setattr("backend.app.a2ui.AntVChartClient.render", fake_render)
+    monkeypatch.setattr("backend.app.a2ui.McpVisualizationClient.render", fake_render)
     def fake_analysis(
         _question, event_sink, _cancellation_token, thinking_enabled, history
     ):
@@ -676,3 +737,22 @@ def test_prompts_bound_history_to_context_not_figures():
     assert "Earlier turns of this conversation" in SYSTEM_PROMPT
     assert "Earlier turns of this conversation" in ANSWER_SYSTEM_PROMPT
     assert "never from an\nearlier turn" in ANSWER_SYSTEM_PROMPT
+
+
+@pytest.mark.asyncio
+async def test_visualization_skips_cleanly_when_no_server_is_configured():
+    """An empty config disables charts visibly, without failing the analysis."""
+    events: list[dict] = []
+    analysis = {
+        "table": {"columns": ["vendor"], "rows": [{"vendor": "A"}]},
+        "visualization": {"status": "PENDING", "data": [{"vendor": "A"}]},
+    }
+    result = await McpVisualizationClient(servers=[]).render("q", analysis, events.append)
+
+    assert result["status"] == "SKIPPED"
+    assert result["asset_url"] is None
+    discovery = [event for event in events if event["tool_call_id"] == "mcp:tools/list"]
+    # The empty result is still reported, so this cannot be mistaken for a model
+    # that simply chose not to draw a chart.
+    assert [event["type"] for event in discovery] == ["tool_call", "tool_result"]
+    assert discovery[-1]["result"] == {"tool_count": 0, "servers": {}}

@@ -11,7 +11,27 @@ make setup
 make demo
 ```
 
-Open [http://127.0.0.1:8000](http://127.0.0.1:8000) locally, or use the machine's LAN address from another device. The server listens on `0.0.0.0:8000` and initializes a deterministic 1,000-row laboratory dataset automatically. When a chart is needed, the backend starts AntV MCP on demand with `npx -y @antv/mcp-server-chart` over stdio; no separate MCP port or long-running chart service is required.
+Open [http://127.0.0.1:8000](http://127.0.0.1:8000) locally, or use the machine's LAN address from another device. The server listens on `0.0.0.0:8000` and initializes a deterministic 1,000-row laboratory dataset automatically.
+
+## Configure MCP tool servers
+
+Tool servers are declared in [`mcp.json`](mcp.json), using the same `mcpServers` shape as Claude Desktop and Cursor, so an entry can be pasted between them. The shipped configuration starts AntV on demand over stdio; nothing is hardcoded in the application, and adding a second server is an edit to this file.
+
+```json
+{
+  "mcpServers": {
+    "antv-chart": {
+      "command": "npx",
+      "args": ["-y", "@antv/mcp-server-chart"],
+      "assetHosts": ["mdn.alipayobjects.com"]
+    }
+  }
+}
+```
+
+`transport` is inferred from the entry shape (`command` for stdio, `url` for streamable HTTP) and may also be set explicitly. Set `enabled` to `false` to keep an entry without starting it, and override the file location with `MCP_CONFIG_PATH`.
+
+The file is committed, so secrets belong in `.env` and are referenced as `${VAR}` inside `env`, `args`, `url` or `headers`. `assetHosts` is an SSRF boundary: only those hosts may serve images a tool returns, and every image is cached and re-served from this origin. A malformed entry fails loudly rather than silently disabling a server. `GET /api/v1/health` reports the resolved configuration.
 
 For frontend and backend hot reload during development:
 

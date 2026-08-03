@@ -19,7 +19,7 @@ type AgentEvent =
   | { id: string; type: 'tool_group'; calls: ToolCall[] }
   | { id: string; type: 'content'; markdown: string }
 type ResultFormat = 'TEXT' | 'INTEGER' | 'DECIMAL_2' | 'CURRENCY_USD' | 'PERCENT_2' | 'DATE' | 'MONTH' | 'DATETIME'
-type Visualization = { status: string; tool_name?: string; title?: string; asset_url?: string | null; error?: string; data: Record<string, string | number>[]; formats?: Record<string, ResultFormat> }
+type Visualization = { status: string; server_name?: string; tool_name?: string; title?: string; asset_url?: string | null; error?: string; data: Record<string, string | number>[]; formats?: Record<string, ResultFormat> }
 type Analysis = { answer: string; requires_clarification?: boolean; table: { columns: string[]; rows: Record<string, string | number>[]; formats?: Record<string, ResultFormat> }; sql: string | null; visualization: Visualization }
 
 const ReasoningApi = { name: 'ReasoningPanel', schema: z.object({ segments: CommonSchemas.DynamicValue, status: CommonSchemas.DynamicValue }) }
@@ -141,7 +141,8 @@ function VisualizationPanel({ visualization }: { visualization: Visualization })
   const safeUrl = visualization.asset_url && isSafeImageUrl(visualization.asset_url) ? visualization.asset_url : null
   const title = visualization.title ?? 'Generated visualization'
   const toolName = visualization.tool_name ?? 'chart'
-  return <section className="visualization-panel"><div className="visualization-head"><div><span>VISUALIZATION AGENT</span><h3>{title}</h3></div><span className="mcp-chip">AntV MCP · {toolName.replace('generate_', '').replace('_chart', '')}</span></div>
+  const serverName = visualization.server_name ?? 'MCP'
+  return <section className="visualization-panel"><div className="visualization-head"><div><span>VISUALIZATION AGENT</span><h3>{title}</h3></div><span className="mcp-chip">{serverName} · {toolName.replace('generate_', '').replace('_chart', '')}</span></div>
     <SafeImage src={safeUrl ?? undefined} alt={title} />
   </section>
 }
@@ -165,7 +166,8 @@ function MermaidDiagram({ source }: { source: string }) {
 }
 
 function isSafeImageUrl(value: string) {
-  try { const url = new URL(value, window.location.origin); return url.origin === window.location.origin || (url.protocol === 'https:' && url.hostname === 'mdn.alipayobjects.com') } catch { return false }
+  // Artifacts are cached and re-served from this origin, so nothing remote is trusted.
+  try { return new URL(value, window.location.origin).origin === window.location.origin } catch { return false }
 }
 function formatToolValue(value: unknown) { return typeof value === 'string' ? value : JSON.stringify(value ?? {}, null, 2) }
 function humanize(value: string) { return value.replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase()) }
