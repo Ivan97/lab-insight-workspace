@@ -27,7 +27,14 @@ async function empty(url: string, init?: RequestInit): Promise<void> {
   if (!response.ok) throw new Error(await response.text())
 }
 
+export interface CanonicalField { entity: string; field: string; display_name: string; description: string; data_type: string; result_format: string; unit: string | null; enum_values: string[]; is_key: boolean; nullable: boolean }
+export interface SchemaEntity { entity: string; display_name: string; description: string; role: string; fields: CanonicalField[] }
+
 export const api = {
+  getCanonicalFields: () => json<{ items: string[] }>('/schema/canonical-fields'),
+  updateCanonicalField: (entity: string, field: string, patch: Partial<Pick<CanonicalField, 'display_name' | 'description' | 'result_format' | 'unit'>>) =>
+    json<CanonicalField>(`/schema/registry/${entity}/${field}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) }),
+  getRegistry: () => json<{ entities: SchemaEntity[]; field_count: number }>('/schema/registry'),
   listIngestions: () => json<{ items: Ingestion[]; total: number }>('/ingestions'),
   getMapping: (batchId: string) => json<MappingDraft>(`/ingestions/${batchId}/mapping`),
   getProfile: (batchId: string) => json<DataProfile>(`/ingestions/${batchId}/profile`),

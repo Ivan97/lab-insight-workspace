@@ -18,7 +18,7 @@ import {
   Upload,
 } from 'lucide-react'
 import { A2UIConversation, A2UIReplay } from './a2ui/A2UIConversation'
-import { api, type DataPreview, type DataProfile, type Ingestion, type JoinRuleInput, type MappingDraft, type SemanticLayer } from './api'
+import { api, type CanonicalField, type DataPreview, type DataProfile, type Ingestion, type JoinRuleInput, type MappingDraft, type SchemaEntity, type SemanticLayer } from './api'
 import './App.css'
 
 type Page = 'sources' | 'schema' | 'analyze'
@@ -56,13 +56,6 @@ const navigation = [
   { id: 'analyze' as const, label: 'Analyze', icon: ChartNoAxesCombined },
 ]
 
-const canonicalFields = [
-  'sample_id', 'vendor', 'project', 'material', 'test_name', 'result', 'cost_amount',
-  'completed_date', 'lab_vendor', 'contract_tier', 'region', 'contracted_cost_usd',
-  'sla_days', 'quality_target_pct', 'owner', 'priority', 'approved_budget_usd',
-  'start_date', 'end_date',
-  'material_family', 'target_failure_pct', 'max_avg_cost_usd', 'risk_tier',
-]
 
 export default function App() {
   const [page, setPage] = useState<Page>('sources')
@@ -273,8 +266,12 @@ function SchemaPage({ sources, batchId, onSelectBatch, onCommitted, onAnalyze }:
   const [profile, setProfile] = useState<DataProfile | null>(null)
   const [preview, setPreview] = useState<DataPreview | null>(null)
   const [reviewTab, setReviewTab] = useState<'profile' | 'preview'>('profile')
-  const [schemaMode, setSchemaMode] = useState<'fields' | 'relationships'>('fields')
+  const [schemaMode, setSchemaMode] = useState<'registry' | 'relationships' | 'fields'>('registry')
   const [semantic, setSemantic] = useState<SemanticLayer | null>(null)
+  // Mapping targets come from the registry. They used to be a literal in this
+  // file, which is how the dropdown came to offer fields that do not exist.
+  const [canonicalFields, setCanonicalFields] = useState<string[]>([])
+  useEffect(() => { void api.getCanonicalFields().then((value) => setCanonicalFields(value.items)) }, [])
   // Sources still awaiting review come first, so the work to do is not buried
   // behind files that are already published. Array.sort is stable, so the
   // original order survives inside each group.
@@ -307,8 +304,8 @@ function SchemaPage({ sources, batchId, onSelectBatch, onCommitted, onAnalyze }:
   const ignoredCount = mapping.mappings.filter((item) => !item.target_field).length
   return <div className="page schema-page">
     <section className="page-heading"><span className="eyebrow">SCHEMA REVIEW</span><h1>Make the meaning explicit.</h1><p>Review AI suggestions before anything enters the trusted analysis layer.</p></section>
-    <div className="schema-mode-tabs" role="tablist"><button className={schemaMode === 'fields' ? 'active' : ''} onClick={() => setSchemaMode('fields')}><FileSpreadsheet size={15} /> Fields & mapping</button><button className={schemaMode === 'relationships' ? 'active' : ''} onClick={() => setSchemaMode('relationships')}><GitMerge size={15} /> Relationships</button></div>
-    {schemaMode === 'relationships' ? <RelationshipsPanel semantic={semantic} onPublished={setSemantic} /> : <>
+    <div className="schema-mode-tabs" role="tablist"><button className={schemaMode === 'registry' ? 'active' : ''} onClick={() => setSchemaMode('registry')}><Database size={15} /> Canonical schema</button><button className={schemaMode === 'relationships' ? 'active' : ''} onClick={() => setSchemaMode('relationships')}><GitMerge size={15} /> Relationships</button><button className={schemaMode === 'fields' ? 'active' : ''} onClick={() => setSchemaMode('fields')}><FileSpreadsheet size={15} /> Source mapping</button></div>
+    {schemaMode === 'registry' ? <RegistryPanel /> : schemaMode === 'relationships' ? <RelationshipsPanel semantic={semantic} onPublished={setSemantic} /> : <>
     <section className="schema-source-switcher section-card" aria-label="Schema sources">
       <div className="schema-source-switcher-head"><div><strong>Source schemas</strong><span>{sources.length} connected files</span></div><small>Select a file to inspect its profile and field mapping.</small></div>
       <div className="schema-source-tabs" role="tablist">{orderedSources.map((item) => { const needsReview = item.status !== 'READY'; return <button role="tab" aria-selected={item.batch_id === source.batch_id} className={item.batch_id === source.batch_id ? 'active' : ''} key={item.batch_id} onClick={() => onSelectBatch(item.batch_id)}><span className={`mini-file-icon ${item.source_type.toLowerCase()}`}>{item.source_type === 'TEXT' ? 'TXT' : item.source_type}</span><span><strong>{item.source_name}</strong><small>{item.record_count.toLocaleString()} records</small></span>{needsReview && <span className="source-tab-flag">Review</span>}</button> })}</div>
@@ -335,6 +332,75 @@ function SchemaPage({ sources, batchId, onSelectBatch, onCommitted, onAnalyze }:
   </div>
 }
 
+const RESULT_FORMATS = ['TEXT', 'INTEGER', 'DECIMAL_2', 'CURRENCY_USD', 'PERCENT_2', 'DATE', 'MONTH', 'DATETIME']
+
+function RegistryPanel() {
+  const [entities, setEntities] = useState<SchemaEntity[] | null>(null)
+  const [saving, setSaving] = useState<string | null>(null)
+  const [error, setError] = useState('')
+
+  useEffect(() => { void api.getRegistry().then((value) => setEntities(value.entities)).catch(() => setError('Unable to load the canonical schema')) }, [])
+  if (error) return <section className="section-card relationship-loading">{error}</section>
+  if (!entities) return <section className="section-card relationship-loading">Loading canonical schema…</section>
+
+  const save = async (field: CanonicalField, patch: Partial<CanonicalField>) => {
+    const key = `${field.entity}.${field.field}`
+    setSaving(key); setError('')
+    try {
+      const updated = await api.updateCanonicalField(field.entity, field.field, patch)
+      setEntities((current) => current?.map((entity) => entity.entity !== field.entity ? entity : {
+        ...entity,
+        fields: entity.fields.map((item) => item.field === field.field ? updated : item),
+      }) ?? null)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Unable to save')
+    } finally { setSaving(null) }
+  }
+
+  return <div className="registry-workspace">
+    <section className="registry-intro section-card">
+      <div><strong>Canonical schema</strong><span>What a field means. Source mappings target these fields, and Text-to-SQL is told these descriptions.</span></div>
+      <span className="registry-count">{entities.reduce((total, entity) => total + entity.fields.length, 0)} fields · {entities.length} entities</span>
+    </section>
+    {error && <section className="section-card registry-error">{error}</section>}
+    {entities.map((entity) => <section className="section-card registry-entity" key={entity.entity}>
+      <div className="section-header">
+        <div><h2><code>{entity.entity}</code> <span className={`entity-role ${entity.role.toLowerCase()}`}>{entity.role}</span></h2><p>{entity.description}</p></div>
+        <span>{entity.fields.length} fields</span>
+      </div>
+      <div className="registry-table">
+        <div className="registry-row registry-head"><span>Field</span><span>Type</span><span>Description</span><span>Render as</span><span>Unit</span></div>
+        {entity.fields.map((field) => <div className="registry-row" key={field.field}>
+          <span className="registry-field">
+            <code>{field.field}</code>
+            {field.is_key && <em title="Key field">key</em>}
+            {!!field.enum_values.length && <small>{field.enum_values.join(' / ')}</small>}
+          </span>
+          {/* Identifier and type come from the physical table and are not editable. */}
+          <span className="registry-type">{field.data_type}{field.nullable ? '' : ' · required'}</span>
+          <input
+            defaultValue={field.description}
+            placeholder="What does this field mean?"
+            aria-label={`Description of ${field.field}`}
+            onBlur={(event) => { if (event.target.value !== field.description) void save(field, { description: event.target.value }) }}
+          />
+          <select value={field.result_format} aria-label={`Render format of ${field.field}`} onChange={(event) => void save(field, { result_format: event.target.value })}>
+            {RESULT_FORMATS.map((format) => <option key={format}>{format}</option>)}
+          </select>
+          <input
+            className="registry-unit"
+            defaultValue={field.unit ?? ''}
+            placeholder="—"
+            aria-label={`Unit of ${field.field}`}
+            onBlur={(event) => { if (event.target.value !== (field.unit ?? '')) void save(field, { unit: event.target.value }) }}
+          />
+          {saving === `${field.entity}.${field.field}` && <i className="registry-saving" aria-label="Saving" />}
+        </div>)}
+      </div>
+    </section>)}
+  </div>
+}
+
 function RelationshipsPanel({ semantic, onPublished }: { semantic: SemanticLayer | null; onPublished: (semantic: SemanticLayer) => void }) {
   const [rules, setRules] = useState<JoinRuleInput[]>([])
   const [saving, setSaving] = useState(false)
@@ -345,6 +411,9 @@ function RelationshipsPanel({ semantic, onPublished }: { semantic: SemanticLayer
   if (!semantic) return <section className="section-card relationship-loading">Loading relationships…</section>
   const table = (name: string) => semantic.tables.find((item) => item.name === name)
   const dimensionTables = semantic.tables.filter((item) => item.name !== semantic.base_table)
+  // A dimension supports a single join from the fact table, so the button has
+  // nothing to add once they are all used. Saying so beats a dead control.
+  const unjoined = dimensionTables.filter((item) => !rules.some((rule) => rule.right_table === item.name)).map((item) => item.name)
   const updateRule = (index: number, patch: Partial<JoinRuleInput>) => setRules((current) => current.map((rule, ruleIndex) => ruleIndex === index ? { ...rule, ...patch } : rule))
   const addRule = () => {
     const nextTable = dimensionTables.find((item) => !rules.some((rule) => rule.right_table === item.name)) ?? dimensionTables[0]
@@ -364,7 +433,7 @@ function RelationshipsPanel({ semantic, onPublished }: { semantic: SemanticLayer
       <div className="relationship-stats"><span><strong>{semantic.rules.length}</strong> relationships</span><span><strong>{semantic.view.column_count}</strong> fields</span><span className="status-badge ready"><CheckCircle2 size={13} /> Published</span></div>
     </section>
     <section className="section-card relationship-editor">
-      <div className="section-header"><div><h2>Join rules</h2><p>Define reviewed paths from the fact table to trusted dimensions. Keys are validated before publishing.</p></div><button className="secondary-button" onClick={addRule} disabled={rules.length >= dimensionTables.length}><Plus size={15} /> Add relationship</button></div>
+      <div className="section-header"><div><h2>Join rules</h2><p>Define reviewed paths from the fact table to trusted dimensions. Keys are validated before publishing.</p></div><div className="relationship-add">{unjoined.length === 0 && <small>Every dimension is already joined. Each one supports a single join from the fact table, so adding another relationship needs a new dimension entity.</small>}<button className="secondary-button" onClick={addRule} disabled={!unjoined.length} title={unjoined.length ? `Join ${unjoined[0]}` : 'No unjoined dimension remains'}><Plus size={15} /> Add relationship</button></div></div>
       <div className="relationship-list">
         {rules.map((rule, index) => {
           const published = semantic.rules.find((item) => item.right_table === rule.right_table && item.left_field === rule.left_field && item.right_field === rule.right_field)

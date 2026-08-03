@@ -25,6 +25,7 @@ from .analysis import to_json_value
 from .cancellation import CancellationToken
 from .database import connection, rows_as_dicts
 from .model_runtime import answer_text, chat_model, reasoning_text
+from .registry import registry_prompt_context
 from .semantic import semantic_prompt_context
 from .skills import skill_middleware
 from .sql_guard import guard_sql
@@ -194,7 +195,9 @@ def build_agent(run: AnalysisRun, event_sink: AgentEventSink | None,
         model=chat_model(thinking_enabled),
         tools=[build_query_tool(run, event_sink, cancellation_token)],
         middleware=skill_middleware(),
-        system_prompt=f"{SYSTEM_PROMPT}\n\n{semantic_prompt_context()}",
+        system_prompt=(
+            f"{SYSTEM_PROMPT}\n\n{semantic_prompt_context()}\n\n{registry_prompt_context()}"
+        ),
     )
 
 
