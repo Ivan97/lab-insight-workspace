@@ -1,14 +1,28 @@
-"""Provider dialects for thinking control and reasoning extraction.
+"""LangChain chat models, configured per provider.
 
-Every provider spells "think" and "do not think" differently, and every
-provider returns reasoning text under a different key. Both concerns live here
-so that swapping DeepSeek for Gemini stays a configuration change instead of an
-edit spread across the planner, the answer stream and the visualization agent.
+Transport, retries, streaming and tool binding come from LangChain. What stays
+here is the part LangChain cannot know: how each provider spells "think" and
+"do not think", and which levels of effort it accepts. Swapping DeepSeek for
+Gemini is then a change to .env rather than to the planner or the answer stream.
+
+Two behaviours are deliberate and verified against the live DeepSeek API:
+
+- `thinking` travels in `extra_body`; the endpoint validates `reasoning_effort`
+  at the top level of the body and silently ignores it nested inside `thinking`.
+- The OpenAI SDK honours proxy environment variables by default, which the old
+  hand-rolled client disabled. Both HTTP clients are pinned to trust_env=False
+  so a SOCKS proxy in the environment cannot capture model traffic.
 """
 
 import os
 from enum import StrEnum
-from typing import Any, Protocol
+from typing import Any
+
+import httpx
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessageChunk
+
+HTTP_TIMEOUT = 120.0
 
 
 class Provider(StrEnum):
@@ -18,15 +32,8 @@ class Provider(StrEnum):
     KIMI = "kimi"
 
 
-class ThinkingMode(StrEnum):
-    """How the composer toggle maps onto a request."""
-
-    ENABLED = "enabled"
-    DISABLED = "disabled"
-
-
 class ReasoningEffort(StrEnum):
-    """Effort levels, ordered cheapest to most expensive by EFFORT_SCALE."""
+    """Ordered cheapest to most expensive by EFFORT_SCALE."""
 
     NONE = "none"
     MINIMAL = "minimal"
@@ -47,175 +54,37 @@ EFFORT_SCALE: tuple[ReasoningEffort, ...] = (
     ReasoningEffort.MAX,
 )
 
-DEFAULT_MODEL = "deepseek-v4-flash"
-
-
-class ThinkingDialect(Protocol):
-    """One provider's way of expressing thinking control."""
-
-    provider: Provider
-    supported_efforts: frozenset[ReasoningEffort]
-
-    def apply(
-        self, payload: dict[str, Any], mode: ThinkingMode, effort: ReasoningEffort
-    ) -> dict[str, Any]: ...
-
-    def reasoning_from_delta(self, delta: dict[str, Any]) -> str | None: ...
-
-
-def _nearest_supported(
-    effort: ReasoningEffort, supported: frozenset[ReasoningEffort]
-) -> ReasoningEffort:
-    """Map a configured effort onto the closest level a provider accepts.
-
-    Providers expose different granularity, so a shared setting has to be
-    translated rather than rejected.
-    """
-    if effort in supported:
-        return effort
-    target = EFFORT_SCALE.index(effort)
-    return min(supported, key=lambda candidate: abs(EFFORT_SCALE.index(candidate) - target))
-
-
-def _openai_style_reasoning(delta: dict[str, Any]) -> str | None:
-    """Both providers stream reasoning under one of these OpenAI-style keys."""
-    reasoning = delta.get("reasoning_content") or delta.get("reasoning")
-    return str(reasoning) if reasoning else None
-
-
-class DeepSeekDialect:
-    """Verified against https://api.deepseek.com/v1 on 2026-08-03.
-
-    `thinking.type` accepts adaptive/enabled/disabled and `reasoning_effort` is
-    validated at the top level of the body -- the API rejects an unknown value
-    there with HTTP 400 and ignores the same key nested inside `thinking`.
-    """
-
-    provider = Provider.DEEPSEEK
-    supported_efforts = frozenset(EFFORT_SCALE)
-
-    def apply(
-        self, payload: dict[str, Any], mode: ThinkingMode, effort: ReasoningEffort
-    ) -> dict[str, Any]:
-        payload["thinking"] = {"type": mode.value}
-        if mode is ThinkingMode.ENABLED:
-            payload["reasoning_effort"] = _nearest_supported(
-                effort, self.supported_efforts
-            ).value
-        else:
-            payload.pop("reasoning_effort", None)
-        return payload
-
-    def reasoning_from_delta(self, delta: dict[str, Any]) -> str | None:
-        return _openai_style_reasoning(delta)
-
-
-class GeminiDialect:
-    """Gemini through its OpenAI-compatibility endpoint.
-
-    Not yet exercised against a live key: Gemini documents `reasoning_effort`
-    on the compatibility layer and a `google.thinking_config.thinking_budget`
-    escape hatch for finer control, and a budget of 0 is how thinking is turned
-    off. Verify both against the real endpoint before trusting this in
-    production.
-    """
-
-    provider = Provider.GEMINI
-    supported_efforts = frozenset(
+# Levels each provider actually accepts. A configured level outside the set is
+# translated to the nearest one rather than dropped.
+SUPPORTED_EFFORTS: dict[Provider, frozenset[ReasoningEffort]] = {
+    Provider.DEEPSEEK: frozenset(EFFORT_SCALE),
+    Provider.GEMINI: frozenset(
         {
             ReasoningEffort.NONE,
             ReasoningEffort.LOW,
             ReasoningEffort.MEDIUM,
             ReasoningEffort.HIGH,
         }
-    )
-
-    def apply(
-        self, payload: dict[str, Any], mode: ThinkingMode, effort: ReasoningEffort
-    ) -> dict[str, Any]:
-        if mode is ThinkingMode.ENABLED:
-            payload["reasoning_effort"] = _nearest_supported(
-                effort, self.supported_efforts
-            ).value
-            payload.pop("google", None)
-        else:
-            payload["reasoning_effort"] = ReasoningEffort.NONE.value
-            payload["google"] = {"thinking_config": {"thinking_budget": 0}}
-        return payload
-
-    def reasoning_from_delta(self, delta: dict[str, Any]) -> str | None:
-        return _openai_style_reasoning(delta)
-
-
-class OpenAIDialect:
-    """Generic OpenAI-compatible endpoint.
-
-    Only `reasoning_effort` is portable here, and reasoning models cannot
-    always be told to stop reasoning, so the field is omitted rather than set
-    to a value the endpoint may reject. Turning the toggle off then relies on
-    LLM_NON_THINKING_MODEL plus the UI suppression in A2UIStream.
-    """
-
-    provider = Provider.OPENAI
-    supported_efforts = frozenset(
+    ),
+    Provider.OPENAI: frozenset(
         {
             ReasoningEffort.MINIMAL,
             ReasoningEffort.LOW,
             ReasoningEffort.MEDIUM,
             ReasoningEffort.HIGH,
         }
-    )
-
-    def apply(
-        self, payload: dict[str, Any], mode: ThinkingMode, effort: ReasoningEffort
-    ) -> dict[str, Any]:
-        if mode is ThinkingMode.ENABLED:
-            payload["reasoning_effort"] = _nearest_supported(
-                effort, self.supported_efforts
-            ).value
-        else:
-            payload.pop("reasoning_effort", None)
-        return payload
-
-    def reasoning_from_delta(self, delta: dict[str, Any]) -> str | None:
-        return _openai_style_reasoning(delta)
-
-
-class PassthroughDialect:
-    """A provider with no verified thinking switch.
-
-    Nothing provider-specific is sent, because guessing a parameter name is how
-    a setting ends up silently ignored. The toggle still selects between
-    LLM_THINKING_MODEL and LLM_NON_THINKING_MODEL, and A2UIStream still hides
-    reasoning events when it is off.
-    """
-
-    provider = Provider.KIMI
-    supported_efforts: frozenset[ReasoningEffort] = frozenset()
-
-    def apply(
-        self, payload: dict[str, Any], mode: ThinkingMode, effort: ReasoningEffort
-    ) -> dict[str, Any]:
-        return payload
-
-    def reasoning_from_delta(self, delta: dict[str, Any]) -> str | None:
-        return _openai_style_reasoning(delta)
-
-
-DIALECTS: dict[Provider, ThinkingDialect] = {
-    Provider.DEEPSEEK: DeepSeekDialect(),
-    Provider.GEMINI: GeminiDialect(),
-    Provider.OPENAI: OpenAIDialect(),
-    Provider.KIMI: PassthroughDialect(),
+    ),
+    Provider.KIMI: frozenset(),
 }
+
+DEFAULT_MODEL = "deepseek-v4-flash"
 
 
 def _parse(enum_type: type[StrEnum], raw: str, setting: str) -> Any:
     """Reject unknown settings loudly.
 
-    A mistyped value used to be dropped by the provider without complaint,
-    which is how LLM_REASONING_EFFORT could look configured while doing
-    nothing.
+    Providers ignore request fields they do not recognise, so a typo used to
+    look configured while doing nothing.
     """
     try:
         return enum_type(raw.strip().lower())
@@ -226,10 +95,6 @@ def _parse(enum_type: type[StrEnum], raw: str, setting: str) -> Any:
 
 def current_provider() -> Provider:
     return _parse(Provider, os.getenv("LLM_PROVIDER", Provider.DEEPSEEK.value), "LLM_PROVIDER")
-
-
-def current_dialect() -> ThinkingDialect:
-    return DIALECTS[current_provider()]
 
 
 def configured_effort() -> ReasoningEffort:
@@ -245,13 +110,94 @@ def model_for_mode(thinking_enabled: bool) -> str:
     return os.getenv(mode_key) or os.getenv("LLM_MODEL", DEFAULT_MODEL)
 
 
-def apply_thinking_mode(payload: dict[str, Any], thinking_enabled: bool) -> dict[str, Any]:
-    """Attach model and thinking control for the configured provider."""
-    payload["model"] = model_for_mode(thinking_enabled)
-    mode = ThinkingMode.ENABLED if thinking_enabled else ThinkingMode.DISABLED
-    return current_dialect().apply(payload, mode, configured_effort())
+def _nearest_supported(
+    effort: ReasoningEffort, supported: frozenset[ReasoningEffort]
+) -> ReasoningEffort:
+    if effort in supported:
+        return effort
+    target = EFFORT_SCALE.index(effort)
+    return min(supported, key=lambda candidate: abs(EFFORT_SCALE.index(candidate) - target))
 
 
-def reasoning_from_delta(delta: dict[str, Any]) -> str | None:
-    """Pull reasoning text out of one streaming delta, if the provider sent any."""
-    return current_dialect().reasoning_from_delta(delta)
+def thinking_body(provider: Provider, thinking_enabled: bool) -> dict[str, Any]:
+    """Provider-specific request fields carrying the composer toggle."""
+    supported = SUPPORTED_EFFORTS[provider]
+    effort = _nearest_supported(configured_effort(), supported) if supported else None
+
+    if provider is Provider.DEEPSEEK:
+        body: dict[str, Any] = {"thinking": {"type": "enabled" if thinking_enabled else "disabled"}}
+        if thinking_enabled and effort:
+            body["reasoning_effort"] = effort.value
+        return body
+
+    if provider is Provider.GEMINI:
+        if thinking_enabled and effort:
+            return {"reasoning_effort": effort.value}
+        # A budget of zero is how Gemini is told not to think. Documented but
+        # not yet exercised against a live key.
+        return {
+            "reasoning_effort": ReasoningEffort.NONE.value,
+            "google": {"thinking_config": {"thinking_budget": 0}},
+        }
+
+    if provider is Provider.OPENAI:
+        # Reasoning models cannot always be told to stop, so the field is
+        # omitted rather than set to a value the endpoint may reject.
+        return {"reasoning_effort": effort.value} if thinking_enabled and effort else {}
+
+    # Kimi has no verified switch; the toggle only selects a model id.
+    return {}
+
+
+class ModelConfigurationError(RuntimeError):
+    pass
+
+
+def chat_model(thinking_enabled: bool, **overrides: Any) -> BaseChatModel:
+    """Build the chat model for one call, with thinking control applied."""
+    base_url = os.getenv("LLM_BASE_URL", "").rstrip("/")
+    api_key = os.getenv("LLM_API_KEY", "")
+    model = model_for_mode(thinking_enabled)
+    if not base_url or not api_key or not model:
+        raise ModelConfigurationError(
+            "LLM is not configured. Set LLM_BASE_URL, LLM_API_KEY and LLM_MODEL."
+        )
+    provider = current_provider()
+    shared: dict[str, Any] = {
+        "model": model,
+        "api_key": api_key,
+        "extra_body": thinking_body(provider, thinking_enabled),
+        "http_client": httpx.Client(trust_env=False, timeout=HTTP_TIMEOUT),
+        "http_async_client": httpx.AsyncClient(trust_env=False, timeout=HTTP_TIMEOUT),
+        **overrides,
+    }
+    if provider is Provider.DEEPSEEK:
+        from langchain_deepseek import ChatDeepSeek
+
+        return ChatDeepSeek(api_base=base_url, **shared)
+
+    from langchain_openai import ChatOpenAI
+
+    return ChatOpenAI(base_url=base_url, **shared)
+
+
+def reasoning_text(chunk: AIMessageChunk) -> str:
+    """Reasoning emitted by one streamed chunk.
+
+    LangChain normalises provider reasoning into `reasoning` content blocks, so
+    this works the same for DeepSeek's reasoning_content and Gemini's thoughts.
+    """
+    return "".join(
+        str(block.get("reasoning") or "")
+        for block in (chunk.content_blocks or [])
+        if block.get("type") == "reasoning"
+    )
+
+
+def answer_text(chunk: AIMessageChunk) -> str:
+    """Visible answer text emitted by one streamed chunk, excluding reasoning."""
+    return "".join(
+        str(block.get("text") or "")
+        for block in (chunk.content_blocks or [])
+        if block.get("type") == "text"
+    )

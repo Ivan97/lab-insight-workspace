@@ -1,14 +1,11 @@
 import json
-import os
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-import httpx
-
 from .config import ROOT_DIR  # noqa: F401 - importing config loads local runtime settings.
 from .conversation import with_history
-from .model_runtime import apply_thinking_mode, reasoning_from_delta
+from .model_runtime import ModelConfigurationError, answer_text, chat_model, reasoning_text
 from .semantic import semantic_prompt_context
 
 SYSTEM_PROMPT = """You are the Text-to-SQL planner for an internal laboratory analytics product.
@@ -72,10 +69,6 @@ Required JSON shape:
 """
 
 
-class ModelConfigurationError(RuntimeError):
-    pass
-
-
 class ModelRequestError(RuntimeError):
     pass
 
@@ -89,10 +82,14 @@ class GeneratedPlan:
 
 
 class TextToSQLPlanner:
-    def __init__(self) -> None:
-        self.base_url = os.getenv("LLM_BASE_URL", "").rstrip("/")
-        self.api_key = os.getenv("LLM_API_KEY", "")
-        self.model = os.getenv("LLM_MODEL", "deepseek-v4-flash")
+    """Plans one read-only SQL statement.
+
+    The plan is parsed from JSON text rather than through
+    `with_structured_output`: that binds a forced tool_choice, which DeepSeek
+    rejects outright in thinking mode ("Thinking mode does not support this
+    tool_choice"). Streaming the raw response also keeps reasoning deltas
+    flowing to the A2UI event stream, which a structured-output call swallows.
+    """
 
     def generate(
         self,
@@ -102,50 +99,27 @@ class TextToSQLPlanner:
         thinking_enabled: bool = True,
         history: list[dict[str, str]] | None = None,
     ) -> GeneratedPlan:
-        if not self.base_url or not self.api_key or not self.model:
-            raise ModelConfigurationError(
-                "LLM is not configured. Set LLM_BASE_URL, LLM_API_KEY and LLM_MODEL."
-            )
         user_prompt = f"User question: {question}"
         if repair_context:
             user_prompt += f"\nThe previous SQL was rejected. Repair it using this error: {repair_context}"
-        payload = apply_thinking_mode({
-            "stream": True,
-            "temperature": 0,
-            "messages": with_history(
-                f"{SYSTEM_PROMPT}\n\n{semantic_prompt_context()}", history, user_prompt
-            ),
-        }, thinking_enabled)
+        messages = with_history(
+            f"{SYSTEM_PROMPT}\n\n{semantic_prompt_context()}", history, user_prompt
+        )
         try:
-            with httpx.Client(timeout=35, trust_env=False) as client, client.stream(
-                "POST",
-                f"{self.base_url}/chat/completions",
-                json=payload,
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                },
-            ) as response:
-                response.raise_for_status()
-                content_parts: list[str] = []
-                for line in response.iter_lines():
-                    if not line.startswith("data:"):
-                        continue
-                    data = line[5:].strip()
-                    if not data or data == "[DONE]":
-                        continue
-                    delta = json.loads(data)["choices"][0].get("delta", {})
-                    reasoning = reasoning_from_delta(delta)
-                    if reasoning and reasoning_sink:
-                        reasoning_sink(str(reasoning))
-                    content = delta.get("content")
-                    if content:
-                        content_parts.append(str(content))
+            model = chat_model(thinking_enabled, temperature=0)
+            content_parts: list[str] = []
+            for chunk in model.stream(messages):
+                reasoning = reasoning_text(chunk)
+                if reasoning and reasoning_sink:
+                    reasoning_sink(reasoning)
+                content_parts.append(answer_text(chunk))
             content = "".join(content_parts)
             if not content:
                 raise ValueError("Planner model returned no content")
             plan = self._parse_plan(content)
-        except (httpx.HTTPError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        except ModelConfigurationError:
+            raise
+        except Exception as exc:
             raise ModelRequestError(f"Text-to-SQL model request failed: {type(exc).__name__}") from exc
         return plan
 

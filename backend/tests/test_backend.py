@@ -3,6 +3,7 @@ import threading
 
 import pytest
 from fastapi.testclient import TestClient
+from langchain_core.messages import AIMessageChunk
 
 from backend.app.a2ui import A2UIStream, validate_envelope
 from backend.app.analysis import run_analysis
@@ -18,10 +19,20 @@ from backend.app.model_client import (
     VISUALIZATION_SYSTEM_PROMPT,
     OpenAICompatibleModel,
 )
-from backend.app.model_runtime import apply_thinking_mode, reasoning_from_delta
+from backend.app.model_runtime import (
+    ModelConfigurationError,
+    Provider,
+    answer_text,
+    chat_model,
+    configured_effort,
+    current_provider,
+    model_for_mode,
+    reasoning_text,
+    thinking_body,
+)
 from backend.app.semantic import semantic_prompt_context
 from backend.app.sql_guard import SQLGuardError, guard_sql
-from backend.app.text_to_sql import SYSTEM_PROMPT, GeneratedPlan, ModelConfigurationError
+from backend.app.text_to_sql import SYSTEM_PROMPT, GeneratedPlan
 
 
 @pytest.fixture
@@ -166,43 +177,47 @@ def test_visualization_mcp_uses_on_demand_npx_stdio(client: TestClient):
     }
 
 
-def test_deepseek_thinking_mode_changes_provider_payload(monkeypatch):
+def test_deepseek_thinking_body_matches_the_live_api(monkeypatch):
     monkeypatch.setenv("LLM_PROVIDER", "deepseek")
     monkeypatch.setenv("LLM_THINKING_MODEL", "deepseek-v4-pro")
     monkeypatch.setenv("LLM_NON_THINKING_MODEL", "deepseek-v4-flash")
     monkeypatch.setenv("LLM_REASONING_EFFORT", "max")
 
-    thinking = apply_thinking_mode({"stream": True}, True)
-    assert thinking["model"] == "deepseek-v4-pro"
+    thinking = thinking_body(Provider.DEEPSEEK, True)
     assert thinking["thinking"] == {"type": "enabled"}
-    # The live API validates reasoning_effort at the top level and ignores the
-    # same key nested inside `thinking`, so placement is load-bearing.
+    # The live API validates reasoning_effort at the top level of the body and
+    # ignores the same key nested inside `thinking`, so placement is load-bearing.
     assert thinking["reasoning_effort"] == "max"
     assert "reasoning_effort" not in thinking["thinking"]
+    assert model_for_mode(True) == "deepseek-v4-pro"
 
-    direct = apply_thinking_mode({"stream": True}, False)
-    assert direct["model"] == "deepseek-v4-flash"
-    assert direct["thinking"] == {"type": "disabled"}
-    assert "reasoning_effort" not in direct
+    direct = thinking_body(Provider.DEEPSEEK, False)
+    assert direct == {"thinking": {"type": "disabled"}}
+    assert model_for_mode(False) == "deepseek-v4-flash"
 
 
-def test_gemini_dialect_translates_the_same_toggle(monkeypatch):
+def test_gemini_translates_the_same_toggle(monkeypatch):
     """Swapping providers must stay a configuration change."""
-    monkeypatch.setenv("LLM_PROVIDER", "gemini")
-    monkeypatch.setenv("LLM_MODEL", "gemini-3-pro")
-    monkeypatch.delenv("LLM_THINKING_MODEL", raising=False)
-    monkeypatch.delenv("LLM_NON_THINKING_MODEL", raising=False)
     # `xhigh` has no Gemini equivalent and is translated, not rejected.
     monkeypatch.setenv("LLM_REASONING_EFFORT", "xhigh")
+    assert thinking_body(Provider.GEMINI, True) == {"reasoning_effort": "high"}
+    assert thinking_body(Provider.GEMINI, False) == {
+        "reasoning_effort": "none",
+        "google": {"thinking_config": {"thinking_budget": 0}},
+    }
 
-    thinking = apply_thinking_mode({"stream": True}, True)
-    assert thinking["model"] == "gemini-3-pro"
-    assert thinking["reasoning_effort"] == "high"
-    assert "thinking" not in thinking
 
-    direct = apply_thinking_mode({"stream": True}, False)
-    assert direct["reasoning_effort"] == "none"
-    assert direct["google"] == {"thinking_config": {"thinking_budget": 0}}
+def test_providers_without_a_verified_switch_send_nothing(monkeypatch):
+    """Guessing a parameter name is how a setting ends up silently ignored."""
+    monkeypatch.setenv("LLM_PROVIDER", "kimi")
+    monkeypatch.setenv("LLM_NON_THINKING_MODEL", "kimi-direct")
+    assert thinking_body(Provider.KIMI, False) == {}
+    assert thinking_body(Provider.KIMI, True) == {}
+    assert model_for_mode(False) == "kimi-direct"
+    # A generic OpenAI endpoint omits the field rather than sending a value it
+    # may reject.
+    assert thinking_body(Provider.OPENAI, False) == {}
+    assert thinking_body(Provider.OPENAI, True) == {"reasoning_effort": "high"}
 
 
 def test_unsupported_runtime_settings_fail_loudly(monkeypatch):
@@ -210,28 +225,45 @@ def test_unsupported_runtime_settings_fail_loudly(monkeypatch):
     monkeypatch.setenv("LLM_PROVIDER", "deepseek")
     monkeypatch.setenv("LLM_REASONING_EFFORT", "hgih")
     with pytest.raises(ValueError, match="LLM_REASONING_EFFORT"):
-        apply_thinking_mode({"stream": True}, True)
+        configured_effort()
 
     monkeypatch.setenv("LLM_REASONING_EFFORT", "high")
     monkeypatch.setenv("LLM_PROVIDER", "deepsekk")
     with pytest.raises(ValueError, match="LLM_PROVIDER"):
-        apply_thinking_mode({"stream": True}, True)
+        current_provider()
 
 
-def test_reasoning_is_read_through_the_provider_dialect(monkeypatch):
+def test_reasoning_and_text_are_read_from_langchain_content_blocks():
+    """LangChain normalises provider reasoning into `reasoning` blocks."""
+    chunk = AIMessageChunk(
+        content=[
+            {"type": "reasoning", "reasoning": "weighing joins"},
+            {"type": "text", "text": "DeltaLab is highest."},
+        ]
+    )
+    assert reasoning_text(chunk) == "weighing joins"
+    assert answer_text(chunk) == "DeltaLab is highest."
+
+    text_only = AIMessageChunk(content=[{"type": "text", "text": "hi"}])
+    assert reasoning_text(text_only) == ""
+    assert answer_text(text_only) == "hi"
+
+
+def test_chat_model_ignores_proxy_environment(monkeypatch):
+    """The OpenAI SDK trusts proxy env vars by default; model traffic must not."""
     monkeypatch.setenv("LLM_PROVIDER", "deepseek")
-    assert reasoning_from_delta({"reasoning_content": "step"}) == "step"
-    assert reasoning_from_delta({"reasoning": "step"}) == "step"
-    assert reasoning_from_delta({"content": "answer"}) is None
+    monkeypatch.setenv("LLM_BASE_URL", "https://api.deepseek.com/v1")
+    monkeypatch.setenv("LLM_API_KEY", "test-key")
+    monkeypatch.setenv("LLM_MODEL", "deepseek-v4-flash")
+    monkeypatch.setenv("ALL_PROXY", "socks5://127.0.0.1:1080")
+    # Construction alone raises ImportError if the SOCKS proxy is picked up.
+    model = chat_model(True)
+    assert model.model_name == "deepseek-v4-flash"
 
-
-def test_other_openai_compatible_providers_switch_models_without_deepseek_fields(
-    monkeypatch,
-):
-    monkeypatch.setenv("LLM_PROVIDER", "kimi")
-    monkeypatch.setenv("LLM_NON_THINKING_MODEL", "kimi-direct")
-    payload = apply_thinking_mode({}, False)
-    assert payload == {"model": "kimi-direct"}
+    monkeypatch.delenv("LLM_API_KEY")
+    monkeypatch.setenv("LLM_API_KEY", "")
+    with pytest.raises(ModelConfigurationError):
+        chat_model(True)
 
 
 def test_reference_tables_support_contract_and_budget_analysis(client: TestClient):
