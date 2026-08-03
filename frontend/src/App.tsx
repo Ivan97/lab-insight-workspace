@@ -17,13 +17,38 @@ import {
   Trash2,
   Upload,
 } from 'lucide-react'
-import { A2UIConversation } from './a2ui/A2UIConversation'
+import { A2UIConversation, A2UIReplay } from './a2ui/A2UIConversation'
 import { api, type DataPreview, type DataProfile, type Ingestion, type JoinRuleInput, type MappingDraft, type SemanticLayer } from './api'
 import './App.css'
 
 type Page = 'sources' | 'schema' | 'analyze'
-type Turn = { question: string; reasoningEnabled: boolean }
+/** `replay` is set for turns restored from the server. Those render from their
+ *  stored snapshot; only turns asked in this session open a stream. */
+type Turn = { question: string; reasoningEnabled: boolean; replay?: unknown[]; incomplete?: boolean }
 type Session = { id: string; title: string; turns: Turn[]; running: boolean }
+
+async function loadSessions(): Promise<Session[]> {
+  const { items } = await api.listConversations()
+  const conversations = await Promise.all(items.map(async (conversation) => {
+    const turns: Turn[] = []
+    if (conversation.question_count) {
+      const messages = await api.listMessages(conversation.conversation_id)
+      for (const message of messages.items) {
+        if (message.role === 'USER') {
+          turns.push({ question: message.content, reasoningEnabled: true })
+          continue
+        }
+        const turn = turns[turns.length - 1]
+        if (!turn) continue
+        // A cancelled or interrupted answer has no snapshot to replay.
+        if (message.a2ui_replay) turn.replay = message.a2ui_replay
+        else turn.incomplete = true
+      }
+    }
+    return { id: conversation.conversation_id, title: conversation.title, turns, running: false }
+  }))
+  return conversations
+}
 
 const navigation = [
   { id: 'sources' as const, label: 'Sources', icon: Database },
@@ -62,11 +87,21 @@ export default function App() {
   useEffect(() => {
     if (initializedSessionRef.current) return
     initializedSessionRef.current = true
-    void api.createConversation().then((value) => {
-      const session = { id: value.conversation_id, title: 'New analysis', turns: [], running: false }
-      setSessions([session])
-      setActiveSessionId(session.id)
-    })
+    void (async () => {
+      try {
+        const restored = await loadSessions()
+        if (restored.length) {
+          setSessions(restored)
+          setActiveSessionId(restored[restored.length - 1].id)
+          return
+        }
+        const value = await api.createConversation()
+        setSessions([{ id: value.conversation_id, title: 'New analysis', turns: [], running: false }])
+        setActiveSessionId(value.conversation_id)
+      } catch (reason) {
+        console.error('Unable to restore conversations', reason)
+      }
+    })()
   }, [])
 
   const createSession = async () => {
@@ -81,6 +116,26 @@ export default function App() {
     }
   }
 
+  const deleteSession = async (sessionId: string) => {
+    try {
+      await api.deleteConversation(sessionId)
+    } catch (reason) {
+      console.error('Unable to delete conversation', reason)
+      return
+    }
+    runningRefs.current.delete(sessionId)
+    const remaining = sessions.filter((session) => session.id !== sessionId)
+    if (!remaining.length) {
+      const value = await api.createConversation()
+      const replacement = { id: value.conversation_id, title: 'New analysis', turns: [], running: false }
+      setSessions([replacement])
+      setActiveSessionId(replacement.id)
+      return
+    }
+    setSessions(remaining)
+    setActiveSessionId((current) => current === sessionId ? remaining[remaining.length - 1].id : current)
+  }
+
   const setRunning = (sessionId: string, running: boolean) => {
     runningRefs.current.set(sessionId, running)
     setSessions((current) => current.map((session) => session.id === sessionId ? { ...session, running } : session))
@@ -92,7 +147,8 @@ export default function App() {
     runningRefs.current.set(sessionId, true)
     setSessions((current) => current.map((session) => session.id === sessionId ? {
       ...session,
-      title: session.turns.length ? session.title : question.slice(0, 38),
+      // Must match the server-side truncation so the title survives a reload unchanged.
+      title: session.turns.length ? session.title : question.slice(0, 60),
       turns: [...session.turns, { question, reasoningEnabled }],
       running: true,
     } : session))
@@ -118,12 +174,15 @@ export default function App() {
                 {item.id === 'analyze' && page === 'analyze' && <section className="conversation-subnav" aria-label="Analysis conversations">
                   <div className="conversation-subnav-head"><span>Conversations</span><button onClick={() => void createSession()} aria-label="New conversation" title="New conversation"><Plus size={14} /></button></div>
                   <div className="conversation-subtabs">
-                    {sessions.map((session, index) => <button key={session.id} className={activeSessionId === session.id ? 'active' : ''} onClick={() => setActiveSessionId(session.id)}>
-                      <span className={session.running ? 'session-state running' : 'session-state'} />
-                      <strong>{session.title}</strong>
-                      <small>{session.running ? 'Running' : session.turns.length ? `${session.turns.length} question${session.turns.length === 1 ? '' : 's'}` : `Conversation ${index + 1}`}</small>
-                    </button>)}
-                    {!sessions.length && <span className="conversation-subnav-empty">Preparing conversation…</span>}
+                    {sessions.map((session, index) => <div className="conversation-subtab" key={session.id}>
+                      <button className={activeSessionId === session.id ? 'active' : ''} onClick={() => setActiveSessionId(session.id)}>
+                        <span className={session.running ? 'session-state running' : 'session-state'} />
+                        <strong>{session.title}</strong>
+                        <small>{session.running ? 'Running' : session.turns.length ? `${session.turns.length} question${session.turns.length === 1 ? '' : 's'}` : `Conversation ${index + 1}`}</small>
+                      </button>
+                      <button className="delete-conversation" onClick={() => void deleteSession(session.id)} disabled={session.running} aria-label={`Delete conversation ${session.title}`} title={session.running ? 'Stop the response before deleting' : 'Delete conversation'}><Trash2 size={13} /></button>
+                    </div>)}
+                    {!sessions.length && <span className="conversation-subnav-empty">Restoring conversations…</span>}
                   </div>
                 </section>}
               </div>
@@ -343,7 +402,12 @@ function AnalyzePage({ sessions, activeSessionId, ask, setRunning }: { sessions:
     <section className="analyze-hero"><div><span className="eyebrow">ASK & ANALYZE</span><h1>What would you like to understand?</h1><p>Ask across every trusted source. Prism will show its work, use the right tools, and surface the decision—not just the numbers.</p></div></section>
     {sessions.map((session) => <section className="session-workspace" key={session.id} hidden={activeSessionId !== session.id}>
       {!session.turns.length && <div className="suggestion-grid">{suggestions.map((item, index) => <button key={item} onClick={() => ask(session.id, item, reasoningFor(session.id))}><span className={`suggestion-icon s${index}`}><LayoutDashboard size={18} /></span><strong>{['Compare vendor performance','Find recent anomalies','Inspect quality risk'][index]}</strong><small>{item}</small><ArrowRight size={16} /></button>)}</div>}
-      {session.turns.map((turn, index) => <div className="conversation" key={`${index}-${turn.question}`}><div className="user-message">{turn.question}</div><A2UIConversation conversationId={session.id} question={turn.question} reasoningEnabled={turn.reasoningEnabled} onStreamingChange={index === session.turns.length - 1 ? (running) => setRunning(session.id, running) : undefined} onCancelReady={index === session.turns.length - 1 ? (cancel) => { if (cancel) cancelRefs.current.set(session.id, cancel); else cancelRefs.current.delete(session.id) } : undefined} /></div>)}
+      {session.turns.map((turn, index) => <div className="conversation" key={`${index}-${turn.question}`}>
+        <div className="user-message">{turn.question}</div>
+        {turn.replay ? <A2UIReplay envelopes={turn.replay} />
+          : turn.incomplete ? <div className="assistant-message stream-cancelled">This response did not finish and was not saved.</div>
+          : <A2UIConversation conversationId={session.id} question={turn.question} reasoningEnabled={turn.reasoningEnabled} onStreamingChange={index === session.turns.length - 1 ? (running) => setRunning(session.id, running) : undefined} onCancelReady={index === session.turns.length - 1 ? (cancel) => { if (cancel) cancelRefs.current.set(session.id, cancel); else cancelRefs.current.delete(session.id) } : undefined} />}
+      </div>)}
       <QuestionComposer running={session.running} reasoningEnabled={reasoningFor(session.id)} onReasoningChange={(value) => setReasoningFor(session.id, value)} onSubmit={(question) => ask(session.id, question, reasoningFor(session.id))} onStop={() => void cancelRefs.current.get(session.id)?.()} />
     </section>)}
     {!sessions.length && <div className="assistant-loading"><i /><span>Preparing your first conversation…</span></div>}

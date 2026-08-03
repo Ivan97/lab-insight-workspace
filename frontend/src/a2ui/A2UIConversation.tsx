@@ -87,6 +87,28 @@ export function A2UIConversation({ conversationId, question, reasoningEnabled, o
   return <div className="assistant-message">{surfaces.map((surface) => <A2uiSurface key={surface.id} surface={surface} />)}</div>
 }
 
+/** Renders an answer already stored on the server. Never opens a stream, so
+ *  reloading the page restores history instead of re-running the analysis. */
+export function A2UIReplay({ envelopes }: { envelopes: unknown[] }) {
+  const processorRef = useRef(new MessageProcessor([analyticsCatalog], undefined, { version: 'v0.9.1' }))
+  const [surfaces, setSurfaces] = useState<SurfaceModel<ReactComponentImplementation>[]>([])
+
+  useEffect(() => {
+    const processor = processorRef.current
+    const sync = () => setSurfaces(Array.from(processor.model.surfacesMap.values()))
+    const created = processor.onSurfaceCreated(sync)
+    const deleted = processor.onSurfaceDeleted(sync)
+    // The snapshot already reflects the mode the question was asked in, so it
+    // is replayed verbatim rather than re-filtered against the current toggle.
+    processor.processMessages(envelopes as A2uiMessage[])
+    sync()
+    return () => { created.unsubscribe(); deleted.unsubscribe() }
+  }, [envelopes])
+
+  if (!surfaces.length) return null
+  return <div className="assistant-message">{surfaces.map((surface) => <A2uiSurface key={surface.id} surface={surface} />)}</div>
+}
+
 function withoutReasoning(message: A2uiMessage): A2uiMessage | null {
   const envelope = message as A2uiMessage & { updateDataModel?: { path?: string; value?: unknown } }
   const update = envelope.updateDataModel

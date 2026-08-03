@@ -10,7 +10,7 @@ from backend.app.cancellation import (
     register_cancellation,
     unregister_cancellation,
 )
-from backend.app.database import connection
+from backend.app.database import connection, json_dumps, utcnow
 from backend.app.main import app
 from backend.app.mcp_chart import AntVChartClient
 from backend.app.model_client import (
@@ -465,3 +465,70 @@ def test_analysis_payload_carries_no_question_independent_metrics():
     payload = _empty_analysis("Which vendor?")
     assert "kpis" not in payload
     assert "insights" not in payload
+
+
+def test_conversations_persist_and_can_be_deleted(client: TestClient):
+    """The sidebar must survive a reload and let a conversation be removed."""
+    created = client.post("/api/v1/conversations").json()
+    conversation_id = created["conversation_id"]
+
+    listed = client.get("/api/v1/conversations").json()
+    entry = next(
+        item for item in listed["items"] if item["conversation_id"] == conversation_id
+    )
+    assert entry["title"] == "New analysis"
+    assert entry["question_count"] == 0
+
+    # Simulate a completed turn the way A2UIStream persists one.
+    with connection() as conn:
+        now = utcnow()
+        snapshot = {"events": [], "content": {"markdown": "done"}, "status": "COMPLETED"}
+        conn.execute(
+            "INSERT INTO messages VALUES (?, ?, 'USER', ?, 'COMPLETED', NULL, ?, ?)",
+            ["u1", conversation_id, "Which vendor is cheapest?", now, now],
+        )
+        conn.execute(
+            "INSERT INTO messages VALUES (?, ?, 'ASSISTANT', ?, 'COMPLETED', ?, ?, ?)",
+            ["a1", conversation_id, "done", json_dumps(snapshot), now, now],
+        )
+        conn.execute(
+            "INSERT INTO a2ui_events VALUES ('a1:1', 'a1', 1, '{}', ?)", [now]
+        )
+        conn.execute(
+            "UPDATE conversations SET title = ? WHERE conversation_id = ?",
+            ["Which vendor is cheapest?", conversation_id],
+        )
+
+    messages = client.get(f"/api/v1/conversations/{conversation_id}/messages").json()
+    assistant = next(item for item in messages["items"] if item["role"] == "ASSISTANT")
+    # A restored answer replays its snapshot instead of re-running the analysis.
+    replay = assistant["a2ui_replay"]
+    assert [next(iter(set(envelope) - {"version"})) for envelope in replay] == [
+        "createSurface", "updateComponents", "updateDataModel",
+    ]
+    assert replay[2]["updateDataModel"]["value"] == snapshot
+    assert replay[0]["createSurface"]["surfaceId"] == "message:a1"
+    user = next(item for item in messages["items"] if item["role"] == "USER")
+    assert user["a2ui_replay"] is None
+
+    reloaded = next(
+        item for item in client.get("/api/v1/conversations").json()["items"]
+        if item["conversation_id"] == conversation_id
+    )
+    assert reloaded["title"] == "Which vendor is cheapest?"
+    assert reloaded["question_count"] == 1
+
+    assert client.delete(f"/api/v1/conversations/{conversation_id}").status_code == 204
+    assert client.get(f"/api/v1/conversations/{conversation_id}/messages").status_code == 404
+    assert all(
+        item["conversation_id"] != conversation_id
+        for item in client.get("/api/v1/conversations").json()["items"]
+    )
+    with connection() as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM messages WHERE conversation_id = ?", [conversation_id]
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT count(*) FROM a2ui_events WHERE message_id = 'a1'"
+        ).fetchone()[0] == 0
+    assert client.delete(f"/api/v1/conversations/{conversation_id}").status_code == 404

@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from .a2ui import A2UIStream
+from .a2ui import A2UIStream, replay_envelopes
 from .cancellation import cancel_active, register_cancellation, unregister_cancellation
 from .config import ARTIFACT_DIR, CATALOG_ID, DEMO_SOURCE_DIR, FRONTEND_DIST
 from .database import connection, init_schema, json_dumps, rows_as_dicts, utcnow
@@ -299,6 +299,48 @@ def create_conversation():
     }
 
 
+@app.get("/api/v1/conversations")
+def list_conversations() -> dict:
+    with connection() as conn:
+        items = rows_as_dicts(
+            conn.execute(
+                """
+                SELECT c.conversation_id, c.title, c.created_at, c.updated_at,
+                       count(m.message_id) FILTER (WHERE m.role = 'USER') AS question_count
+                FROM conversations c
+                LEFT JOIN messages m USING (conversation_id)
+                GROUP BY c.conversation_id, c.title, c.created_at, c.updated_at
+                ORDER BY c.created_at
+                """
+            )
+        )
+    return {"items": items, "total": len(items)}
+
+
+@app.delete("/api/v1/conversations/{conversation_id}", status_code=204)
+def delete_conversation(conversation_id: str) -> None:
+    with connection() as conn:
+        exists = conn.execute(
+            "SELECT 1 FROM conversations WHERE conversation_id = ?", [conversation_id]
+        ).fetchone()
+        if not exists:
+            raise HTTPException(404, "Conversation not found")
+        # a2ui_events is keyed by message, so collect the ids before the
+        # messages themselves are removed.
+        message_ids = [
+            row[0]
+            for row in conn.execute(
+                "SELECT message_id FROM messages WHERE conversation_id = ?", [conversation_id]
+            ).fetchall()
+        ]
+        for message_id in message_ids:
+            cancel_active(conversation_id, message_id)
+            conn.execute("DELETE FROM a2ui_events WHERE message_id = ?", [message_id])
+        conn.execute("DELETE FROM stream_requests WHERE conversation_id = ?", [conversation_id])
+        conn.execute("DELETE FROM messages WHERE conversation_id = ?", [conversation_id])
+        conn.execute("DELETE FROM conversations WHERE conversation_id = ?", [conversation_id])
+
+
 @app.get("/api/v1/conversations/{conversation_id}/messages")
 def list_messages(conversation_id: str):
     with connection() as conn:
@@ -321,7 +363,13 @@ def list_messages(conversation_id: str):
     for item in items:
         snapshot = item.get("a2ui_surface_snapshot")
         if isinstance(snapshot, str):
-            item["a2ui_surface_snapshot"] = json.loads(snapshot)
+            snapshot = json.loads(snapshot)
+            item["a2ui_surface_snapshot"] = snapshot
+        item["a2ui_replay"] = (
+            replay_envelopes(item["message_id"], snapshot)
+            if item["role"] == "ASSISTANT" and isinstance(snapshot, dict)
+            else None
+        )
     return {"items": items, "total": len(items)}
 
 

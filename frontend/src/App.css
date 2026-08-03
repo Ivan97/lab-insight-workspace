@@ -16,9 +16,14 @@
 .conversation-subnav-head button:hover { background: #e7f1ff; }
 .conversation-subnav-head button:disabled { opacity: .4; cursor: default; }
 .conversation-subtabs { display: grid; gap: 3px; max-height: min(42vh, 360px); overflow-y: auto; scrollbar-width: thin; }
-.conversation-subtabs > button { min-width: 0; min-height: 48px; padding: 7px; display: grid; grid-template-columns: 7px minmax(0,1fr); grid-template-rows: 1fr 1fr; column-gap: 8px; text-align: left; border: 0; border-radius: 9px; color: #6f6f75; background: transparent; cursor: pointer; }
-.conversation-subtabs > button:hover { background: #eeeef2; }
-.conversation-subtabs > button.active { color: #1d1d1f; background: #edf5ff; }
+.conversation-subtab { position: relative; display: grid; }
+.conversation-subtab > button:first-child { min-width: 0; min-height: 48px; padding: 7px 28px 7px 7px; display: grid; grid-template-columns: 7px minmax(0,1fr); grid-template-rows: 1fr 1fr; column-gap: 8px; text-align: left; border: 0; border-radius: 9px; color: #6f6f75; background: transparent; cursor: pointer; }
+.conversation-subtab:hover > button:first-child { background: #eeeef2; }
+.conversation-subtab > button.active { color: #1d1d1f; background: #edf5ff; }
+.delete-conversation { position: absolute; top: 50%; right: 4px; transform: translateY(-50%); width: 22px; height: 22px; display: grid; place-items: center; border: 0; border-radius: 6px; color: #8b8b91; background: transparent; opacity: 0; cursor: pointer; }
+.conversation-subtab:hover > .delete-conversation, .delete-conversation:focus-visible { opacity: 1; }
+.delete-conversation:hover { color: #c0392b; background: #fdecea; }
+.delete-conversation:disabled { opacity: 0; cursor: default; }
 .conversation-subtabs strong, .conversation-subtabs small { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .conversation-subtabs strong { align-self: end; font-size: 10px; font-weight: 650; }
 .conversation-subtabs small { grid-column: 2; color: #8b8b91; font-size: 9px; }

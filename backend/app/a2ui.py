@@ -32,6 +32,37 @@ class A2UIValidationError(ValueError):
     pass
 
 
+def replay_envelopes(message_id: str, snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    """Rebuild a completed answer from its stored snapshot.
+
+    Restoring history must never re-run the analysis, so a reloaded page
+    replays these envelopes instead of opening a new stream.
+    """
+    surface_id = f"message:{message_id}"
+    envelopes = [
+        {
+            "version": "v0.9.1",
+            "createSurface": {
+                "surfaceId": surface_id,
+                "catalogId": CATALOG_ID,
+                "theme": {"primaryColor": "#007AFF"},
+                "sendDataModel": False,
+            },
+        },
+        {
+            "version": "v0.9.1",
+            "updateComponents": {"surfaceId": surface_id, "components": COMPONENTS},
+        },
+        {
+            "version": "v0.9.1",
+            "updateDataModel": {"surfaceId": surface_id, "path": "/", "value": snapshot},
+        },
+    ]
+    for envelope in envelopes:
+        validate_envelope(envelope)
+    return envelopes
+
+
 class A2UIStream:
     def __init__(
         self,
@@ -370,6 +401,10 @@ class A2UIStream:
             ).fetchone():
                 return
             now = utcnow()
+            first_turn = not conn.execute(
+                "SELECT 1 FROM messages WHERE conversation_id = ? LIMIT 1",
+                [self.conversation_id],
+            ).fetchone()
             conn.execute(
                 "INSERT INTO messages VALUES (?, ?, 'USER', ?, 'COMPLETED', NULL, ?, ?)",
                 [str(uuid.uuid4()), self.conversation_id, self.question, now, now],
@@ -378,6 +413,18 @@ class A2UIStream:
                 "INSERT INTO messages VALUES (?, ?, 'ASSISTANT', '', 'STREAMING', NULL, ?, NULL)",
                 [self.message_id, self.conversation_id, now],
             )
+            # The sidebar reads titles from the database, so the first question
+            # has to name the conversation there rather than only in the client.
+            if first_turn:
+                conn.execute(
+                    "UPDATE conversations SET title = ?, updated_at = ? WHERE conversation_id = ?",
+                    [self.question[:60], now, self.conversation_id],
+                )
+            else:
+                conn.execute(
+                    "UPDATE conversations SET updated_at = ? WHERE conversation_id = ?",
+                    [now, self.conversation_id],
+                )
 
     def _complete_message(self) -> None:
         with connection() as conn:
