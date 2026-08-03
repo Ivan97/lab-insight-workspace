@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import uuid
 from contextlib import asynccontextmanager
@@ -10,11 +11,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from .a2ui import A2UIStream
+from .a2ui import A2UIStream, replay_envelopes
 from .cancellation import cancel_active, register_cancellation, unregister_cancellation
 from .config import ARTIFACT_DIR, CATALOG_ID, DEMO_SOURCE_DIR, FRONTEND_DIST
 from .database import connection, init_schema, json_dumps, rows_as_dicts, utcnow
 from .demo_data import default_mappings, initialize_demo
+from .logging_config import configure_logging
+from .logging_config import describe as describe_logging
+from .mcp_chart import prime_tool_cache
+from .mcp_config import config_path, load_servers
+from .model_runtime import current_provider
 from .profiling import preview_frame, profile_frame, profile_text
 from .schemas import (
     A2UIActionRequest,
@@ -31,14 +37,27 @@ from .semantic import (
     initialize_semantic_layer,
     replace_semantic_rules,
 )
+from .skills import discovered_skills, execute_enabled, skill_dir
+
+logger = logging.getLogger("prism.app")
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    configure_logging()
+    logger.info("starting up")
     init_schema()
     initialize_demo()
     initialize_semantic_layer()
+    # Warms the MCP tool schemas so the first chart does not pay discovery, and
+    # so the model can pick a tool before any server is started. Never fatal.
+    app.state.mcp_discovery = await prime_tool_cache()
+    logger.info(
+        "ready provider=%s skills=%s mcp=%s",
+        current_provider().value, discovered_skills(), app.state.mcp_discovery,
+    )
     yield
+    logger.info("shutting down")
 
 
 app = FastAPI(title="Lab Insight Workspace", version="0.1.0", lifespan=lifespan)
@@ -61,10 +80,17 @@ def health() -> dict:
             "provider": os.getenv("LLM_PROVIDER", "not-configured"),
             "configured": model_configured,
         },
+        "logging": describe_logging(),
+        "skills": {
+            "directory": str(skill_dir()),
+            "execute_enabled": execute_enabled(),
+            "discovered": discovered_skills(),
+        },
         "visualization_mcp": {
             "status": "on-demand",
-            "transport": "stdio",
-            "command": ["npx", "-y", "@antv/mcp-server-chart"],
+            "config_path": str(config_path()),
+            "discovery": getattr(app.state, "mcp_discovery", None),
+            "servers": [server.describe() for server in load_servers()],
         },
     }
 
@@ -157,9 +183,9 @@ async def upload_file(file: UploadFile = File(...), vendor_hint: str | None = No
                 "target_field": target,
                 "confidence": 0.9 if target else 0.35,
                 "transform": "IDENTITY",
-                "reason": "Matched from field name and sampled values"
+                "reason": "Matched on a token in the source field name"
                 if target
-                else "No confident canonical field match",
+                else "No canonical field matched the source field name",
                 "status": "SUGGESTED" if target else "IGNORED",
                 "sample_before": samples,
                 "sample_after": samples,
@@ -168,7 +194,7 @@ async def upload_file(file: UploadFile = File(...), vendor_hint: str | None = No
         )
     with connection() as conn:
         conn.execute(
-            "INSERT INTO ingestion_batches VALUES (?, ?, ?, ?, 'NEEDS_REVIEW', ?, 86, 'Review field mapping', ?, ?)",
+            "INSERT INTO ingestion_batches VALUES (?, ?, ?, ?, 'NEEDS_REVIEW', ?, 'Review field mapping', ?, ?)",
             [batch_id, source_type, file.filename or "upload", vendor_hint, frame.height, now, now],
         )
         conn.execute(
@@ -190,7 +216,7 @@ def ingest_text(request: TextIngestionRequest):
     profile, preview = profile_text(request.content)
     with connection() as conn:
         conn.execute(
-            "INSERT INTO ingestion_batches VALUES (?, 'TEXT', ?, ?, 'NEEDS_REVIEW', ?, 80, 'Review extracted fields', ?, ?)",
+            "INSERT INTO ingestion_batches VALUES (?, 'TEXT', ?, ?, 'NEEDS_REVIEW', ?, 'Review extracted fields', ?, ?)",
             [batch_id, request.source_name, request.vendor_hint, count, now, now],
         )
         conn.execute(
@@ -299,6 +325,48 @@ def create_conversation():
     }
 
 
+@app.get("/api/v1/conversations")
+def list_conversations() -> dict:
+    with connection() as conn:
+        items = rows_as_dicts(
+            conn.execute(
+                """
+                SELECT c.conversation_id, c.title, c.created_at, c.updated_at,
+                       count(m.message_id) FILTER (WHERE m.role = 'USER') AS question_count
+                FROM conversations c
+                LEFT JOIN messages m USING (conversation_id)
+                GROUP BY c.conversation_id, c.title, c.created_at, c.updated_at
+                ORDER BY c.created_at
+                """
+            )
+        )
+    return {"items": items, "total": len(items)}
+
+
+@app.delete("/api/v1/conversations/{conversation_id}", status_code=204)
+def delete_conversation(conversation_id: str) -> None:
+    with connection() as conn:
+        exists = conn.execute(
+            "SELECT 1 FROM conversations WHERE conversation_id = ?", [conversation_id]
+        ).fetchone()
+        if not exists:
+            raise HTTPException(404, "Conversation not found")
+        # a2ui_events is keyed by message, so collect the ids before the
+        # messages themselves are removed.
+        message_ids = [
+            row[0]
+            for row in conn.execute(
+                "SELECT message_id FROM messages WHERE conversation_id = ?", [conversation_id]
+            ).fetchall()
+        ]
+        for message_id in message_ids:
+            cancel_active(conversation_id, message_id)
+            conn.execute("DELETE FROM a2ui_events WHERE message_id = ?", [message_id])
+        conn.execute("DELETE FROM stream_requests WHERE conversation_id = ?", [conversation_id])
+        conn.execute("DELETE FROM messages WHERE conversation_id = ?", [conversation_id])
+        conn.execute("DELETE FROM conversations WHERE conversation_id = ?", [conversation_id])
+
+
 @app.get("/api/v1/conversations/{conversation_id}/messages")
 def list_messages(conversation_id: str):
     with connection() as conn:
@@ -321,7 +389,13 @@ def list_messages(conversation_id: str):
     for item in items:
         snapshot = item.get("a2ui_surface_snapshot")
         if isinstance(snapshot, str):
-            item["a2ui_surface_snapshot"] = json.loads(snapshot)
+            snapshot = json.loads(snapshot)
+            item["a2ui_surface_snapshot"] = snapshot
+        item["a2ui_replay"] = (
+            replay_envelopes(item["message_id"], snapshot)
+            if item["role"] == "ASSISTANT" and isinstance(snapshot, dict)
+            else None
+        )
     return {"items": items, "total": len(items)}
 
 

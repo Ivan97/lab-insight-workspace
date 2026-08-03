@@ -1,0 +1,26 @@
+{
+  "$comment": [
+    "MCP tool servers available to the visualization agent.",
+    "Same shape as Claude Desktop / Cursor, so entries can be pasted between them.",
+    "This file is committed: keep secrets in .env and reference them as ${VAR}",
+    "inside env, args, url or headers.",
+    "transport is inferred from the entry shape ('command' -> stdio, 'url' -> http)",
+    "and may also be set explicitly. Set enabled to false to keep an entry without",
+    "starting it. Override the file location with MCP_CONFIG_PATH.",
+    "assetHosts is an SSRF boundary: only these hosts may serve images the server returns."
+  ],
+  "mcpServers": {
+    "antv-chart": {
+      "transport": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@antv/mcp-server-chart"
+      ],
+      "enabled": true,
+      "assetHosts": [
+        "mdn.alipayobjects.com"
+      ]
+    }
+  }
+}

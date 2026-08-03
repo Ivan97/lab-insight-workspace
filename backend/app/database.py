@@ -71,7 +71,6 @@ def init_schema() -> None:
                 vendor_hint VARCHAR,
                 status VARCHAR NOT NULL,
                 record_count INTEGER NOT NULL,
-                quality_score DOUBLE NOT NULL,
                 current_stage VARCHAR,
                 created_at TIMESTAMP NOT NULL,
                 updated_at TIMESTAMP NOT NULL
@@ -172,6 +171,9 @@ def init_schema() -> None:
             );
             """
         )
+        # quality_score was a hardcoded constant that never described the source.
+        # Drop it from databases created before it was removed.
+        conn.execute("ALTER TABLE ingestion_batches DROP COLUMN IF EXISTS quality_score")
 
 
 def rows_as_dicts(cursor: duckdb.DuckDBPyConnection) -> list[dict[str, Any]]:

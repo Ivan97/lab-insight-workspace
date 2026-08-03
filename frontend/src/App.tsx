@@ -5,8 +5,6 @@ import {
   BrainCircuit,
   ChartNoAxesCombined,
   CheckCircle2,
-  ChevronRight,
-  CircleHelp,
   Database,
   Download,
   FileSpreadsheet,
@@ -14,19 +12,43 @@ import {
   LayoutDashboard,
   Menu,
   Plus,
-  Search,
   Square,
   Sparkles,
   Trash2,
   Upload,
 } from 'lucide-react'
-import { A2UIConversation } from './a2ui/A2UIConversation'
+import { A2UIConversation, A2UIReplay } from './a2ui/A2UIConversation'
 import { api, type DataPreview, type DataProfile, type Ingestion, type JoinRuleInput, type MappingDraft, type SemanticLayer } from './api'
 import './App.css'
 
 type Page = 'sources' | 'schema' | 'analyze'
-type Turn = { question: string; reasoningEnabled: boolean }
+/** `replay` is set for turns restored from the server. Those render from their
+ *  stored snapshot; only turns asked in this session open a stream. */
+type Turn = { question: string; reasoningEnabled: boolean; replay?: unknown[]; incomplete?: boolean }
 type Session = { id: string; title: string; turns: Turn[]; running: boolean }
+
+async function loadSessions(): Promise<Session[]> {
+  const { items } = await api.listConversations()
+  const conversations = await Promise.all(items.map(async (conversation) => {
+    const turns: Turn[] = []
+    if (conversation.question_count) {
+      const messages = await api.listMessages(conversation.conversation_id)
+      for (const message of messages.items) {
+        if (message.role === 'USER') {
+          turns.push({ question: message.content, reasoningEnabled: true })
+          continue
+        }
+        const turn = turns[turns.length - 1]
+        if (!turn) continue
+        // A cancelled or interrupted answer has no snapshot to replay.
+        if (message.a2ui_replay) turn.replay = message.a2ui_replay
+        else turn.incomplete = true
+      }
+    }
+    return { id: conversation.conversation_id, title: conversation.title, turns, running: false }
+  }))
+  return conversations
+}
 
 const navigation = [
   { id: 'sources' as const, label: 'Sources', icon: Database },
@@ -65,11 +87,21 @@ export default function App() {
   useEffect(() => {
     if (initializedSessionRef.current) return
     initializedSessionRef.current = true
-    void api.createConversation().then((value) => {
-      const session = { id: value.conversation_id, title: 'New analysis', turns: [], running: false }
-      setSessions([session])
-      setActiveSessionId(session.id)
-    })
+    void (async () => {
+      try {
+        const restored = await loadSessions()
+        if (restored.length) {
+          setSessions(restored)
+          setActiveSessionId(restored[restored.length - 1].id)
+          return
+        }
+        const value = await api.createConversation()
+        setSessions([{ id: value.conversation_id, title: 'New analysis', turns: [], running: false }])
+        setActiveSessionId(value.conversation_id)
+      } catch (reason) {
+        console.error('Unable to restore conversations', reason)
+      }
+    })()
   }, [])
 
   const createSession = async () => {
@@ -84,18 +116,39 @@ export default function App() {
     }
   }
 
+  const deleteSession = async (sessionId: string) => {
+    try {
+      await api.deleteConversation(sessionId)
+    } catch (reason) {
+      console.error('Unable to delete conversation', reason)
+      return
+    }
+    runningRefs.current.delete(sessionId)
+    const remaining = sessions.filter((session) => session.id !== sessionId)
+    if (!remaining.length) {
+      const value = await api.createConversation()
+      const replacement = { id: value.conversation_id, title: 'New analysis', turns: [], running: false }
+      setSessions([replacement])
+      setActiveSessionId(replacement.id)
+      return
+    }
+    setSessions(remaining)
+    setActiveSessionId((current) => current === sessionId ? remaining[remaining.length - 1].id : current)
+  }
+
   const setRunning = (sessionId: string, running: boolean) => {
     runningRefs.current.set(sessionId, running)
     setSessions((current) => current.map((session) => session.id === sessionId ? { ...session, running } : session))
   }
 
-  const ask = (sessionId: string, value: string, reasoningEnabled = true) => {
+  const ask = (sessionId: string, value: string, reasoningEnabled: boolean) => {
     const question = value.trim()
     if (!question || runningRefs.current.get(sessionId)) return
     runningRefs.current.set(sessionId, true)
     setSessions((current) => current.map((session) => session.id === sessionId ? {
       ...session,
-      title: session.turns.length ? session.title : question.slice(0, 38),
+      // Must match the server-side truncation so the title survives a reload unchanged.
+      title: session.turns.length ? session.title : question.slice(0, 60),
       turns: [...session.turns, { question, reasoningEnabled }],
       running: true,
     } : session))
@@ -121,12 +174,15 @@ export default function App() {
                 {item.id === 'analyze' && page === 'analyze' && <section className="conversation-subnav" aria-label="Analysis conversations">
                   <div className="conversation-subnav-head"><span>Conversations</span><button onClick={() => void createSession()} aria-label="New conversation" title="New conversation"><Plus size={14} /></button></div>
                   <div className="conversation-subtabs">
-                    {sessions.map((session, index) => <button key={session.id} className={activeSessionId === session.id ? 'active' : ''} onClick={() => setActiveSessionId(session.id)}>
-                      <span className={session.running ? 'session-state running' : 'session-state'} />
-                      <strong>{session.title}</strong>
-                      <small>{session.running ? 'Running' : session.turns.length ? `${session.turns.length} question${session.turns.length === 1 ? '' : 's'}` : `Conversation ${index + 1}`}</small>
-                    </button>)}
-                    {!sessions.length && <span className="conversation-subnav-empty">Preparing conversation…</span>}
+                    {sessions.map((session, index) => <div className="conversation-subtab" key={session.id}>
+                      <button className={activeSessionId === session.id ? 'active' : ''} onClick={() => setActiveSessionId(session.id)}>
+                        <span className={session.running ? 'session-state running' : 'session-state'} />
+                        <strong>{session.title}</strong>
+                        <small>{session.running ? 'Running' : session.turns.length ? `${session.turns.length} question${session.turns.length === 1 ? '' : 's'}` : `Conversation ${index + 1}`}</small>
+                      </button>
+                      <button className="delete-conversation" onClick={() => void deleteSession(session.id)} disabled={session.running} aria-label={`Delete conversation ${session.title}`} title={session.running ? 'Stop the response before deleting' : 'Delete conversation'}><Trash2 size={13} /></button>
+                    </div>)}
+                    {!sessions.length && <span className="conversation-subnav-empty">Restoring conversations…</span>}
                   </div>
                 </section>}
               </div>
@@ -135,15 +191,15 @@ export default function App() {
         </nav>
         <div className="sidebar-footer">
           <div className="status-dot" />
-          <div><strong>System ready</strong><span>1,000 records indexed</span></div>
+          <div><strong>System ready</strong></div>
         </div>
       </aside>
 
       <main className="main-area">
         <header className="topbar">
           <button className="icon-button" aria-label="Toggle sidebar" onClick={() => setSidebarOpen((value) => !value)}><Menu size={18} /></button>
-          <div className="scope-pill"><Database size={14} /><span>All laboratory data</span><ChevronRight size={14} /></div>
-          <div className="topbar-actions"><button className="icon-button" aria-label="Search"><Search size={18} /></button><button className="icon-button" aria-label="Help"><CircleHelp size={18} /></button><div className="avatar">IL</div></div>
+          <div className="scope-pill"><Database size={14} /><span>All laboratory data</span></div>
+          <div className="topbar-actions"><div className="avatar">IL</div></div>
         </header>
 
         {page === 'sources' && <SourcesPage sources={sources} refresh={refreshSources} openReview={openReview} />}
@@ -184,14 +240,14 @@ function SourcesPage({ sources, refresh, openReview }: { sources: Ingestion[]; r
 
       <section className="overview-grid">
         <div className="metric-panel"><span>Connected sources</span><strong>{sources.length}</strong><small>CSV, Excel and text</small></div>
-        <div className="metric-panel"><span>Ready for analysis</span><strong>{ready}</strong><small>{sources.length - ready} source needs review</small></div>
-        <div className="metric-panel"><span>Canonical records</span><strong>1,000</strong><small>Updated moments ago</small></div>
+        <div className="metric-panel"><span>Ready for analysis</span><strong>{ready}</strong><small>{sources.length - ready} awaiting review</small></div>
+        <div className="metric-panel"><span>Source records</span><strong>{sources.reduce((total, item) => total + item.record_count, 0).toLocaleString()}</strong><small>Across all connected sources</small></div>
       </section>
 
       <section className="section-card source-card">
-        <div className="section-header"><div><h2>Data sources</h2><p>Every source keeps its original lineage and mapping history.</p></div><button className="more-button">•••</button></div>
+        <div className="section-header"><div><h2>Data sources</h2><p>Every source keeps its original lineage and mapping history.</p></div></div>
         <div className="source-table" role="table">
-          <div className="source-row source-head" role="row"><span>Source</span><span>Type</span><span>Records</span><span>Quality</span><span>Status</span><span /></div>
+          <div className="source-row source-head" role="row"><span>Source</span><span>Type</span><span>Records</span><span>Status</span><span /></div>
           {sources.map((source) => <SourceRow key={source.batch_id} source={source} openReview={openReview} />)}
         </div>
       </section>
@@ -204,7 +260,6 @@ function SourceRow({ source, openReview }: { source: Ingestion; openReview: (id:
   return <div className="source-row" role="row">
     <div className="source-name"><div className={`file-icon ${source.source_type.toLowerCase()}`}>{source.source_type === 'TEXT' ? 'TXT' : source.source_type}</div><div><strong>{source.source_name}</strong><small>{source.vendor_hint ?? 'Unstructured source'}</small></div></div>
     <span>{source.source_type}</span><span>{source.record_count.toLocaleString()}</span>
-    <span className="quality-score"><i style={{ width: `${source.quality_score}%` }} />{source.quality_score}%</span>
     <span><span className={`status-badge ${isReady ? 'ready' : 'review'}`}>{isReady ? <CheckCircle2 size={13} /> : <Activity size={13} />}{isReady ? 'Ready' : 'Needs review'}</span></span>
     <div className="row-actions">
       {source.download_url && <a className="download-action" href={source.download_url} download aria-label={`Download ${source.source_name}`} title="Download original file"><Download size={14} /></a>}
@@ -220,7 +275,14 @@ function SchemaPage({ sources, batchId, onSelectBatch, onCommitted, onAnalyze }:
   const [reviewTab, setReviewTab] = useState<'profile' | 'preview'>('profile')
   const [schemaMode, setSchemaMode] = useState<'fields' | 'relationships'>('fields')
   const [semantic, setSemantic] = useState<SemanticLayer | null>(null)
-  const source = sources.find((item) => item.batch_id === batchId) ?? sources[0]
+  // Sources still awaiting review come first, so the work to do is not buried
+  // behind files that are already published. Array.sort is stable, so the
+  // original order survives inside each group.
+  const orderedSources = useMemo(
+    () => [...sources].sort((a, b) => Number(b.status !== 'READY') - Number(a.status !== 'READY')),
+    [sources],
+  )
+  const source = sources.find((item) => item.batch_id === batchId) ?? orderedSources[0]
   const sourceId = source?.batch_id
   useEffect(() => {
     if (!sourceId) return
@@ -242,13 +304,14 @@ function SchemaPage({ sources, batchId, onSelectBatch, onCommitted, onAnalyze }:
 
   if (!source || !mapping) return <div className="page loading-state">Loading mapping…</div>
   const attentionCount = mapping.mappings.filter((item) => item.confidence < .8).length
+  const ignoredCount = mapping.mappings.filter((item) => !item.target_field).length
   return <div className="page schema-page">
     <section className="page-heading"><span className="eyebrow">SCHEMA REVIEW</span><h1>Make the meaning explicit.</h1><p>Review AI suggestions before anything enters the trusted analysis layer.</p></section>
     <div className="schema-mode-tabs" role="tablist"><button className={schemaMode === 'fields' ? 'active' : ''} onClick={() => setSchemaMode('fields')}><FileSpreadsheet size={15} /> Fields & mapping</button><button className={schemaMode === 'relationships' ? 'active' : ''} onClick={() => setSchemaMode('relationships')}><GitMerge size={15} /> Relationships</button></div>
     {schemaMode === 'relationships' ? <RelationshipsPanel semantic={semantic} onPublished={setSemantic} /> : <>
     <section className="schema-source-switcher section-card" aria-label="Schema sources">
       <div className="schema-source-switcher-head"><div><strong>Source schemas</strong><span>{sources.length} connected files</span></div><small>Select a file to inspect its profile and field mapping.</small></div>
-      <div className="schema-source-tabs" role="tablist">{sources.map((item) => <button role="tab" aria-selected={item.batch_id === source.batch_id} className={item.batch_id === source.batch_id ? 'active' : ''} key={item.batch_id} onClick={() => onSelectBatch(item.batch_id)}><span className={`mini-file-icon ${item.source_type.toLowerCase()}`}>{item.source_type === 'TEXT' ? 'TXT' : item.source_type}</span><span><strong>{item.source_name}</strong><small>{item.record_count.toLocaleString()} records</small></span></button>)}</div>
+      <div className="schema-source-tabs" role="tablist">{orderedSources.map((item) => { const needsReview = item.status !== 'READY'; return <button role="tab" aria-selected={item.batch_id === source.batch_id} className={item.batch_id === source.batch_id ? 'active' : ''} key={item.batch_id} onClick={() => onSelectBatch(item.batch_id)}><span className={`mini-file-icon ${item.source_type.toLowerCase()}`}>{item.source_type === 'TEXT' ? 'TXT' : item.source_type}</span><span><strong>{item.source_name}</strong><small>{item.record_count.toLocaleString()} records</small></span>{needsReview && <span className="source-tab-flag">Review</span>}</button> })}</div>
     </section>
     <section className="review-summary section-card"><div className="source-name"><div className={`file-icon ${source.source_type.toLowerCase()}`}>{source.source_type === 'TEXT' ? 'TXT' : source.source_type}</div><div><strong>{source.source_name}</strong><small>{source.record_count} records · mapping version {mapping.version}</small></div></div><div className="review-progress"><span>{mapping.mappings.filter((item) => item.confidence >= .8).length} auto-mapped</span><span>{attentionCount} need attention</span></div></section>
     {profile && preview && <section className="section-card data-review-card">
@@ -266,7 +329,7 @@ function SchemaPage({ sources, batchId, onSelectBatch, onCommitted, onAnalyze }:
           <span><code className="transform">{item.transform}</code>{item.warnings[0] && <small className="warning-copy">{item.warnings[0]}</small>}</span>
         </div>)}
       </div>
-      <div className="mapping-footer"><div><CheckCircle2 size={17} /><span>All required canonical fields are covered</span></div><button className="primary-button" onClick={() => void commit()}>Confirm & publish <ArrowRight size={16} /></button></div>
+      <div className="mapping-footer"><div><span>{ignoredCount ? `${ignoredCount} of ${mapping.mappings.length} source fields will be ignored` : `All ${mapping.mappings.length} source fields are mapped`}</span></div><button className="primary-button" onClick={() => void commit()}>Confirm & publish <ArrowRight size={16} /></button></div>
     </section>
     </>}
   </div>
@@ -328,37 +391,48 @@ function RelationshipsPanel({ semantic, onPublished }: { semantic: SemanticLayer
   </div>
 }
 
-function AnalyzePage({ sessions, activeSessionId, ask, setRunning }: { sessions: Session[]; activeSessionId: string | null; ask: (sessionId: string, question: string, reasoningEnabled?: boolean) => void; setRunning: (sessionId: string, running: boolean) => void }) {
+function AnalyzePage({ sessions, activeSessionId, ask, setRunning }: { sessions: Session[]; activeSessionId: string | null; ask: (sessionId: string, question: string, reasoningEnabled: boolean) => void; setRunning: (sessionId: string, running: boolean) => void }) {
   const cancelRefs = useRef(new Map<string, () => Promise<void>>())
+  const [reasoningBySession, setReasoningBySession] = useState<Record<string, boolean>>({})
   const suggestions = useMemo(() => [
     'Compare cost, pass rate and turnaround time by vendor',
     'What cost trends or anomalies appeared in recent months?',
     'Which materials have the highest failure rate?',
   ], [])
 
+  // Single source of truth for the composer toggle: suggestion cards and the
+  // composer must send the same reasoning mode for a session.
+  // Thinking is opt-in; the toggle starts off.
+  const reasoningFor = (sessionId: string) => reasoningBySession[sessionId] ?? false
+  const setReasoningFor = (sessionId: string, value: boolean) => setReasoningBySession((current) => ({ ...current, [sessionId]: value }))
+
   return <div className="page analyze-page">
     <section className="analyze-hero"><div><span className="eyebrow">ASK & ANALYZE</span><h1>What would you like to understand?</h1><p>Ask across every trusted source. Prism will show its work, use the right tools, and surface the decision—not just the numbers.</p></div></section>
     {sessions.map((session) => <section className="session-workspace" key={session.id} hidden={activeSessionId !== session.id}>
-      {!session.turns.length && <div className="suggestion-grid">{suggestions.map((item, index) => <button key={item} onClick={() => ask(session.id, item)}><span className={`suggestion-icon s${index}`}><LayoutDashboard size={18} /></span><strong>{['Compare vendor performance','Find recent anomalies','Inspect quality risk'][index]}</strong><small>{item}</small><ArrowRight size={16} /></button>)}</div>}
-      {session.turns.map((turn, index) => <div className="conversation" key={`${index}-${turn.question}`}><div className="user-message">{turn.question}</div><A2UIConversation conversationId={session.id} question={turn.question} reasoningEnabled={turn.reasoningEnabled} onStreamingChange={index === session.turns.length - 1 ? (running) => setRunning(session.id, running) : undefined} onCancelReady={index === session.turns.length - 1 ? (cancel) => { if (cancel) cancelRefs.current.set(session.id, cancel); else cancelRefs.current.delete(session.id) } : undefined} /></div>)}
-      <QuestionComposer running={session.running} onSubmit={(question, reasoningEnabled) => ask(session.id, question, reasoningEnabled)} onStop={() => void cancelRefs.current.get(session.id)?.()} />
+      {!session.turns.length && <div className="suggestion-grid">{suggestions.map((item, index) => <button key={item} onClick={() => ask(session.id, item, reasoningFor(session.id))}><span className={`suggestion-icon s${index}`}><LayoutDashboard size={18} /></span><strong>{['Compare vendor performance','Find recent anomalies','Inspect quality risk'][index]}</strong><small>{item}</small><ArrowRight size={16} /></button>)}</div>}
+      {session.turns.map((turn, index) => <div className="conversation" key={`${index}-${turn.question}`}>
+        <div className="user-message">{turn.question}</div>
+        {turn.replay ? <A2UIReplay envelopes={turn.replay} />
+          : turn.incomplete ? <div className="assistant-message stream-cancelled">This response did not finish and was not saved.</div>
+          : <A2UIConversation conversationId={session.id} question={turn.question} reasoningEnabled={turn.reasoningEnabled} onStreamingChange={index === session.turns.length - 1 ? (running) => setRunning(session.id, running) : undefined} onCancelReady={index === session.turns.length - 1 ? (cancel) => { if (cancel) cancelRefs.current.set(session.id, cancel); else cancelRefs.current.delete(session.id) } : undefined} />}
+      </div>)}
+      <QuestionComposer running={session.running} reasoningEnabled={reasoningFor(session.id)} onReasoningChange={(value) => setReasoningFor(session.id, value)} onSubmit={(question) => ask(session.id, question, reasoningFor(session.id))} onStop={() => void cancelRefs.current.get(session.id)?.()} />
     </section>)}
     {!sessions.length && <div className="assistant-loading"><i /><span>Preparing your first conversation…</span></div>}
   </div>
 }
 
-function QuestionComposer({ running, onSubmit, onStop }: { running: boolean; onSubmit: (question: string, reasoningEnabled: boolean) => void; onStop: () => void }) {
+function QuestionComposer({ running, reasoningEnabled, onReasoningChange, onSubmit, onStop }: { running: boolean; reasoningEnabled: boolean; onReasoningChange: (reasoningEnabled: boolean) => void; onSubmit: (question: string) => void; onStop: () => void }) {
   const [draft, setDraft] = useState('')
-  const [reasoningEnabled, setReasoningEnabled] = useState(true)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const composingRef = useRef(false)
   const submit = () => {
     const value = draft.trim()
     if (running || !value) return
-    onSubmit(value, reasoningEnabled)
+    onSubmit(value)
     setDraft('')
     window.requestAnimationFrame(() => inputRef.current?.focus())
   }
   useEffect(() => { if (!running) inputRef.current?.focus() }, [running])
-  return <div className="composer-wrap"><form className={`composer ${running ? 'running stop-mode' : ''}`} onSubmit={(event) => { event.preventDefault(); submit() }}><Sparkles size={18} /><textarea ref={inputRef} rows={1} value={draft} placeholder={running ? 'Prepare your next question while this response runs…' : 'Ask a question about the published data…'} onChange={(event) => setDraft(event.target.value)} onCompositionStart={() => { composingRef.current = true }} onCompositionEnd={() => { composingRef.current = false }} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing && !composingRef.current) { event.preventDefault(); submit() } }} aria-label="Ask a question" /><button type={running ? 'button' : 'submit'} disabled={!running && !draft.trim()} onClick={running ? onStop : undefined} aria-label={running ? 'Stop response' : 'Send question'} title={running ? 'Stop response' : 'Send question'}>{running ? <Square size={13} fill="currentColor" /> : <ArrowRight size={18} />}</button></form><div className="composer-footer"><label className={`reasoning-toggle ${running ? 'locked' : ''}`}><BrainCircuit size={13} /><span>{running ? (reasoningEnabled ? '本轮思考模式' : '本轮快速模式') : '思考模式'}</span><input type="checkbox" checked={reasoningEnabled} disabled={running} onChange={(event) => setReasoningEnabled(event.target.checked)} /><i aria-hidden="true" /></label><span>{running ? 'You can keep typing. Stop the current response or wait for it to finish before sending.' : 'Answers use published data only. SQL and metric definitions remain available for review.'}</span></div></div>
+  return <div className="composer-wrap"><form className={`composer ${running ? 'running stop-mode' : ''}`} onSubmit={(event) => { event.preventDefault(); submit() }}><Sparkles size={18} /><textarea ref={inputRef} rows={1} value={draft} placeholder={running ? 'Prepare your next question while this response runs…' : 'Ask a question about the published data…'} onChange={(event) => setDraft(event.target.value)} onCompositionStart={() => { composingRef.current = true }} onCompositionEnd={() => { composingRef.current = false }} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing && !composingRef.current) { event.preventDefault(); submit() } }} aria-label="Ask a question" /><button type={running ? 'button' : 'submit'} disabled={!running && !draft.trim()} onClick={running ? onStop : undefined} aria-label={running ? 'Stop response' : 'Send question'} title={running ? 'Stop response' : 'Send question'}>{running ? <Square size={13} fill="currentColor" /> : <ArrowRight size={18} />}</button></form><div className="composer-footer"><label className={`reasoning-toggle ${running ? 'locked' : ''}`}><BrainCircuit size={13} /><span>{running ? (reasoningEnabled ? '本轮思考模式' : '本轮快速模式') : '思考模式'}</span><input type="checkbox" checked={reasoningEnabled} disabled={running} onChange={(event) => onReasoningChange(event.target.checked)} /><i aria-hidden="true" /></label><span>{running ? 'You can keep typing. Stop the current response or wait for it to finish before sending.' : 'Answers use published data only. SQL and metric definitions remain available for review.'}</span></div></div>
 }

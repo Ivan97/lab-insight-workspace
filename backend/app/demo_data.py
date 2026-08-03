@@ -23,12 +23,12 @@ TESTS = [
 ]
 
 DEMO_SOURCES = [
-    ("CSV", "vendor-a-results.csv", "Aster Labs", "READY", 350, 98),
-    ("XLSX", "bluepeak-q2.xlsx", "BluePeak", "NEEDS_REVIEW", 300, 84),
-    ("TEXT", "slack-lab-updates.txt", None, "READY", 42, 91),
-    ("CSV", "vendor-contracts.csv", "Contract reference", "READY", 6, 99),
-    ("XLSX", "project-budgets.xlsx", "Portfolio planning", "READY", 10, 97),
-    ("CSV", "material-quality-targets.csv", "Quality standards", "READY", 5, 99),
+    ("CSV", "vendor-a-results.csv", "Aster Labs", "READY", 350),
+    ("XLSX", "bluepeak-q2.xlsx", "BluePeak", "NEEDS_REVIEW", 300),
+    ("TEXT", "slack-lab-updates.txt", None, "READY", 42),
+    ("CSV", "vendor-contracts.csv", "Contract reference", "READY", 6),
+    ("XLSX", "project-budgets.xlsx", "Portfolio planning", "READY", 10),
+    ("CSV", "material-quality-targets.csv", "Quality standards", "READY", 5),
 ]
 
 VENDOR_CONTRACTS = [
@@ -161,7 +161,7 @@ def _ensure_reference_tables(conn) -> None:
 
 def _ensure_demo_batches(conn) -> list[str]:
     now = utcnow()
-    for source_type, source_name, vendor, status, record_count, score in DEMO_SOURCES:
+    for source_type, source_name, vendor, status, record_count in DEMO_SOURCES:
         existing = conn.execute(
             "SELECT batch_id FROM ingestion_batches WHERE source_name = ?", [source_name]
         ).fetchone()
@@ -169,9 +169,9 @@ def _ensure_demo_batches(conn) -> list[str]:
             continue
         batch_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"mini-hackathon:{source_name}"))
         conn.execute(
-            "INSERT INTO ingestion_batches VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO ingestion_batches VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
-                batch_id, source_type, source_name, vendor, status, record_count, score,
+                batch_id, source_type, source_name, vendor, status, record_count,
                 "Ready for analysis" if status == "READY" else "Review field mapping", now, now,
             ],
         )

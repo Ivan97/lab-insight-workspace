@@ -22,9 +22,7 @@ def _empty_analysis(answer: str) -> dict[str, Any]:
     return {
         "answer": answer,
         "requires_clarification": True,
-        "kpis": [],
         "table": {"columns": [], "rows": [], "row_count": 0, "truncated": False},
-        "insights": [],
         "sql": None,
         "visualization": {
             "status": "SKIPPED",
@@ -105,7 +103,7 @@ def _execute_plan(
             "result": {"error": str(exc)},
         })
         raise
-    json_rows = [{key: _to_json_value(value) for key, value in row.items()} for row in rows]
+    json_rows = [{key: to_json_value(value) for key, value in row.items()} for row in rows]
     _emit(event_sink, {
         "type": "tool_result",
         "tool_call_id": query_id,
@@ -121,7 +119,7 @@ def _execute_plan(
     return guarded_sql, json_rows
 
 
-def _to_json_value(value: Any) -> Any:
+def to_json_value(value: Any) -> Any:
     """Convert database-native objects for transport without applying display policy."""
     if isinstance(value, datetime):
         return value.isoformat(timespec="seconds")
@@ -137,6 +135,7 @@ def run_analysis(
     event_sink: AnalysisEventSink | None = None,
     cancellation_token: CancellationToken | None = None,
     thinking_enabled: bool = True,
+    history: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     planner = TextToSQLPlanner()
     def reasoning_sink(chunk: str) -> None:
@@ -150,6 +149,7 @@ def run_analysis(
         question,
         reasoning_sink=reasoning_sink if thinking_enabled else None,
         thinking_enabled=thinking_enabled,
+        history=history,
     )
     if plan.clarification:
         return _empty_analysis(plan.clarification)
@@ -166,6 +166,7 @@ def run_analysis(
             repair_context=str(exc),
             reasoning_sink=reasoning_sink if thinking_enabled else None,
             thinking_enabled=thinking_enabled,
+            history=history,
         )
         if plan.clarification:
             return _empty_analysis(plan.clarification)
@@ -173,48 +174,9 @@ def run_analysis(
             plan, event_sink, attempt=2, cancellation_token=cancellation_token
         )
 
-    with connection() as conn:
-        remove_interrupt = (
-            cancellation_token.add_callback(conn.interrupt)
-            if cancellation_token
-            else lambda: None
-        )
-        try:
-            total_tests, total_cost, pass_rate, turnaround = conn.execute(
-                """
-                SELECT count(*), round(sum(cost_usd), 2),
-                       round(100.0 * sum(CASE WHEN result = 'PASS' THEN 1 ELSE 0 END) / count(*), 1),
-                       round(avg(turnaround_days), 1)
-                FROM fact_test_results
-                """
-            ).fetchone()
-        finally:
-            remove_interrupt()
-
     return {
         "answer": "The query completed successfully. Base the response only on its returned rows.",
         "requires_clarification": False,
-        "kpis": [
-            {"key": "tests", "label": "Tests", "value": total_tests, "format": "INTEGER"},
-            {
-                "key": "cost",
-                "label": "Total cost",
-                "value": total_cost,
-                "format": "CURRENCY_USD",
-            },
-            {
-                "key": "pass_rate",
-                "label": "Pass rate",
-                "value": pass_rate,
-                "format": "PERCENT",
-            },
-            {
-                "key": "turnaround",
-                "label": "Avg. turnaround",
-                "value": turnaround,
-                "format": "DAYS",
-            },
-        ],
         "table": {
             "columns": list(rows[0]) if rows else [],
             "formats": plan.formats,
@@ -222,7 +184,6 @@ def run_analysis(
             "row_count": len(rows),
             "truncated": len(rows) == 200,
         },
-        "insights": [],
         "sql": guarded_sql,
         "visualization": {
             "status": "PENDING" if rows else "SKIPPED",

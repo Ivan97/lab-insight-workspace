@@ -3,6 +3,7 @@ import threading
 
 import pytest
 from fastapi.testclient import TestClient
+from langchain_core.messages import AIMessageChunk
 
 from backend.app.a2ui import A2UIStream, validate_envelope
 from backend.app.analysis import run_analysis
@@ -10,18 +11,34 @@ from backend.app.cancellation import (
     register_cancellation,
     unregister_cancellation,
 )
-from backend.app.database import connection
+from backend.app.database import connection, json_dumps, utcnow
 from backend.app.main import app
-from backend.app.mcp_chart import AntVChartClient
+from backend.app.mcp_chart import McpVisualizationClient
+from backend.app.mcp_config import (
+    McpConfigError,
+    McpTransport,
+    enabled_servers,
+    load_servers,
+)
 from backend.app.model_client import (
     ANSWER_SYSTEM_PROMPT,
     VISUALIZATION_SYSTEM_PROMPT,
     OpenAICompatibleModel,
 )
-from backend.app.model_runtime import apply_thinking_mode
+from backend.app.model_runtime import (
+    ModelConfigurationError,
+    Provider,
+    answer_text,
+    chat_model,
+    configured_effort,
+    current_provider,
+    model_for_mode,
+    reasoning_text,
+    thinking_body,
+)
 from backend.app.semantic import semantic_prompt_context
 from backend.app.sql_guard import SQLGuardError, guard_sql
-from backend.app.text_to_sql import SYSTEM_PROMPT, GeneratedPlan, ModelConfigurationError
+from backend.app.text_to_sql import SYSTEM_PROMPT, GeneratedPlan
 
 
 @pytest.fixture
@@ -153,43 +170,161 @@ def test_visualization_is_selected_from_runtime_tools_not_planner_rules():
     assert "selected tool's JSON Schema" in VISUALIZATION_SYSTEM_PROMPT
 
 
-def test_visualization_mcp_uses_on_demand_npx_stdio(client: TestClient):
-    chart_client = AntVChartClient()
-    assert chart_client.server.command == "npx"
-    assert chart_client.server.args == ["-y", "@antv/mcp-server-chart"]
+def test_visualization_mcp_comes_from_the_config_file(client: TestClient):
+    """The shipped AntV server must be declared in mcp.json, not in code."""
+    servers = enabled_servers()
+    antv = next(server for server in servers if server.name == "antv-chart")
+    assert antv.transport is McpTransport.STDIO
+    assert [antv.command, *antv.args] == ["npx", "-y", "@antv/mcp-server-chart"]
+    # The SSRF allowlist travels with the server declaration.
+    assert antv.asset_hosts == ("mdn.alipayobjects.com",)
+
+    assert McpVisualizationClient().servers == servers
 
     visualization = client.get("/api/v1/health").json()["visualization_mcp"]
-    assert visualization == {
-        "status": "on-demand",
-        "transport": "stdio",
-        "command": ["npx", "-y", "@antv/mcp-server-chart"],
-    }
+    assert visualization["status"] == "on-demand"
+    assert visualization["config_path"].endswith("mcp.json")
+    assert visualization["servers"] == [server.describe() for server in load_servers()]
 
 
-def test_deepseek_thinking_mode_changes_provider_payload(monkeypatch):
+def test_mcp_config_is_parsed_validated_and_expanded(tmp_path, monkeypatch):
+    monkeypatch.setenv("CHART_TOKEN", "s3cret")
+    config = tmp_path / "mcp.json"
+    config.write_text(json.dumps({
+        "mcpServers": {
+            # transport omitted: inferred from the entry shape.
+            "local": {
+                "command": "npx",
+                "args": ["-y", "server", "--key=${CHART_TOKEN}"],
+                "env": {"TOKEN": "${CHART_TOKEN}"},
+                "assetHosts": ["Cdn.Example.COM"],
+            },
+            "remote": {"url": "https://tools.example.com/mcp", "headers": {"X-Key": "${CHART_TOKEN}"}},
+            "parked": {"command": "noop", "enabled": False},
+        }
+    }))
+    local, remote, parked = load_servers(config)
+
+    assert local.transport is McpTransport.STDIO
+    # Secrets stay in the environment; the committed file only references them.
+    assert local.args == ["-y", "server", "--key=s3cret"]
+    assert local.env == {"TOKEN": "s3cret"}
+    assert local.asset_hosts == ("cdn.example.com",)
+    assert remote.transport is McpTransport.HTTP
+    assert remote.url == "https://tools.example.com/mcp"
+    assert remote.headers == {"X-Key": "s3cret"}
+    assert parked.enabled is False
+    assert [server.name for server in enabled_servers(config)] == ["local", "remote"]
+    # Header values may be tokens and must not reach the health endpoint.
+    assert "s3cret" not in json.dumps(remote.describe())
+
+    missing = tmp_path / "absent.json"
+    assert load_servers(missing) == []
+
+    for broken, expected in [
+        ({"mcpServers": {"x": {"transport": "carrier-pigeon", "command": "a"}}}, "transport="),
+        ({"mcpServers": {"x": {}}}, "requires a command"),
+        ({"mcpServers": {"x": {"url": "https://a", "headers": {"k": 1}}}}, "map of strings"),
+        ({"mcpServers": {"x": {"command": "a", "assetHosts": "nope"}}}, "list of hostnames"),
+        ({"mcpServers": {"x": {"command": "a", "enabled": "yes"}}}, "true or false"),
+        ({"servers": {}}, "'mcpServers'"),
+    ]:
+        config.write_text(json.dumps(broken))
+        with pytest.raises(McpConfigError, match=expected):
+            load_servers(config)
+
+    config.write_text("{not json")
+    with pytest.raises(McpConfigError, match="not valid JSON"):
+        load_servers(config)
+
+
+def test_deepseek_thinking_body_matches_the_live_api(monkeypatch):
     monkeypatch.setenv("LLM_PROVIDER", "deepseek")
     monkeypatch.setenv("LLM_THINKING_MODEL", "deepseek-v4-pro")
     monkeypatch.setenv("LLM_NON_THINKING_MODEL", "deepseek-v4-flash")
     monkeypatch.setenv("LLM_REASONING_EFFORT", "max")
 
-    thinking = apply_thinking_mode({"stream": True}, True)
-    assert thinking["model"] == "deepseek-v4-pro"
+    thinking = thinking_body(Provider.DEEPSEEK, True)
     assert thinking["thinking"] == {"type": "enabled"}
+    # The live API validates reasoning_effort at the top level of the body and
+    # ignores the same key nested inside `thinking`, so placement is load-bearing.
     assert thinking["reasoning_effort"] == "max"
+    assert "reasoning_effort" not in thinking["thinking"]
+    assert model_for_mode(True) == "deepseek-v4-pro"
 
-    direct = apply_thinking_mode({"stream": True}, False)
-    assert direct["model"] == "deepseek-v4-flash"
-    assert direct["thinking"] == {"type": "disabled"}
-    assert "reasoning_effort" not in direct
+    direct = thinking_body(Provider.DEEPSEEK, False)
+    assert direct == {"thinking": {"type": "disabled"}}
+    assert model_for_mode(False) == "deepseek-v4-flash"
 
 
-def test_other_openai_compatible_providers_switch_models_without_deepseek_fields(
-    monkeypatch,
-):
+def test_gemini_translates_the_same_toggle(monkeypatch):
+    """Swapping providers must stay a configuration change."""
+    # `xhigh` has no Gemini equivalent and is translated, not rejected.
+    monkeypatch.setenv("LLM_REASONING_EFFORT", "xhigh")
+    assert thinking_body(Provider.GEMINI, True) == {"reasoning_effort": "high"}
+    assert thinking_body(Provider.GEMINI, False) == {
+        "reasoning_effort": "none",
+        "google": {"thinking_config": {"thinking_budget": 0}},
+    }
+
+
+def test_providers_without_a_verified_switch_send_nothing(monkeypatch):
+    """Guessing a parameter name is how a setting ends up silently ignored."""
     monkeypatch.setenv("LLM_PROVIDER", "kimi")
     monkeypatch.setenv("LLM_NON_THINKING_MODEL", "kimi-direct")
-    payload = apply_thinking_mode({}, False)
-    assert payload == {"model": "kimi-direct"}
+    assert thinking_body(Provider.KIMI, False) == {}
+    assert thinking_body(Provider.KIMI, True) == {}
+    assert model_for_mode(False) == "kimi-direct"
+    # A generic OpenAI endpoint omits the field rather than sending a value it
+    # may reject.
+    assert thinking_body(Provider.OPENAI, False) == {}
+    assert thinking_body(Provider.OPENAI, True) == {"reasoning_effort": "high"}
+
+
+def test_unsupported_runtime_settings_fail_loudly(monkeypatch):
+    """A silently dropped setting is how LLM_REASONING_EFFORT became a no-op."""
+    monkeypatch.setenv("LLM_PROVIDER", "deepseek")
+    monkeypatch.setenv("LLM_REASONING_EFFORT", "hgih")
+    with pytest.raises(ValueError, match="LLM_REASONING_EFFORT"):
+        configured_effort()
+
+    monkeypatch.setenv("LLM_REASONING_EFFORT", "high")
+    monkeypatch.setenv("LLM_PROVIDER", "deepsekk")
+    with pytest.raises(ValueError, match="LLM_PROVIDER"):
+        current_provider()
+
+
+def test_reasoning_and_text_are_read_from_langchain_content_blocks():
+    """LangChain normalises provider reasoning into `reasoning` blocks."""
+    chunk = AIMessageChunk(
+        content=[
+            {"type": "reasoning", "reasoning": "weighing joins"},
+            {"type": "text", "text": "DeltaLab is highest."},
+        ]
+    )
+    assert reasoning_text(chunk) == "weighing joins"
+    assert answer_text(chunk) == "DeltaLab is highest."
+
+    text_only = AIMessageChunk(content=[{"type": "text", "text": "hi"}])
+    assert reasoning_text(text_only) == ""
+    assert answer_text(text_only) == "hi"
+
+
+def test_chat_model_ignores_proxy_environment(monkeypatch):
+    """The OpenAI SDK trusts proxy env vars by default; model traffic must not."""
+    monkeypatch.setenv("LLM_PROVIDER", "deepseek")
+    monkeypatch.setenv("LLM_BASE_URL", "https://api.deepseek.com/v1")
+    monkeypatch.setenv("LLM_API_KEY", "test-key")
+    monkeypatch.setenv("LLM_MODEL", "deepseek-v4-flash")
+    monkeypatch.setenv("ALL_PROXY", "socks5://127.0.0.1:1080")
+    # Construction alone raises ImportError if the SOCKS proxy is picked up.
+    model = chat_model(True)
+    assert model.model_name == "deepseek-v4-flash"
+
+    monkeypatch.delenv("LLM_API_KEY")
+    monkeypatch.setenv("LLM_API_KEY", "")
+    with pytest.raises(ModelConfigurationError):
+        chat_model(True)
 
 
 def test_reference_tables_support_contract_and_budget_analysis(client: TestClient):
@@ -291,8 +426,10 @@ def test_reasoning_events_complete_at_output_boundaries():
 @pytest.mark.parametrize(
     ("reasoning_enabled", "expected_event_types"),
     [
-        (True, ["reasoning", "tool_group", "content"]),
-        (False, ["tool_group", "content"]),
+        # The agent streams its answer before the chart is rendered, so the
+        # visualization tool call lands after the content rather than before it.
+        (True, ["reasoning", "tool_group", "content", "tool_group"]),
+        (False, ["tool_group", "content", "tool_group"]),
     ],
 )
 async def test_stream_is_ordered_and_completes(
@@ -320,35 +457,29 @@ async def test_stream_is_ordered_and_completes(
             "asset_url": "/api/v1/assets/chart.png",
         }
 
-    monkeypatch.setattr("backend.app.a2ui.AntVChartClient.render", fake_render)
-    def fake_analysis(
-        _question, event_sink, _cancellation_token, thinking_enabled
+    observed_history: list = []
+    monkeypatch.setattr("backend.app.a2ui.McpVisualizationClient.render", fake_render)
+
+    async def fake_stream_agent(
+        _question, run, cancellation_token=None, thinking_enabled=True, history=None
     ):
         observed_modes.append(thinking_enabled)
-        event_sink({"type": "reasoning_delta", "delta": "按供应商聚合测试数量。"})
-        event_sink({
+        observed_history.append(history)
+        # The agent emits reasoning, then the guarded query tool's events, then
+        # the answer. A2UIStream must keep that order and suppress reasoning in
+        # fast mode.
+        yield {"type": "reasoning_delta", "delta": "按供应商聚合测试数量。"}
+        yield {
             "type": "tool_result", "tool_call_id": "duckdb_query:1",
             "name": "DuckDB · execute_query", "status": "COMPLETED",
             "arguments": {"sql": "SELECT 1"}, "result": {"row_count": 1},
-        })
-        return {
-            "answer": "Query completed.",
-            "requires_clarification": False,
-            "kpis": [],
-            "table": {"columns": ["vendor", "tests"], "rows": [{"vendor": "A", "tests": 2}], "row_count": 1, "truncated": False},
-            "insights": [],
-            "sql": "SELECT vendor, count(*) AS tests FROM fact_test_results GROUP BY vendor LIMIT 200",
-            "visualization": {"status": "PENDING", "data": [{"vendor": "A", "tests": 2}]},
-            "warnings": [],
         }
-
-    monkeypatch.setattr("backend.app.a2ui.run_analysis", fake_analysis)
-
-    async def fake_answer(self, question, analysis, thinking_enabled):
-        observed_modes.append(thinking_enabled)
+        run.sql = "SELECT vendor, count(*) AS tests FROM fact_test_results GROUP BY vendor LIMIT 200"
+        run.rows = [{"vendor": "A", "tests": 2}]
+        run.columns = ["vendor", "tests"]
         yield {"type": "content_delta", "delta": "A has 2 tests."}
 
-    monkeypatch.setattr("backend.app.a2ui.OpenAICompatibleModel.stream_answer", fake_answer)
+    monkeypatch.setattr("backend.app.a2ui.stream_agent", fake_stream_agent)
     with TestClient(app) as client:
         conversation = client.post("/api/v1/conversations").json()
         stream = A2UIStream(
@@ -376,6 +507,10 @@ async def test_stream_is_ordered_and_completes(
     tool_event = next(event for event in final_events if event["type"] == "tool_group")
     content_event = next(event for event in final_events if event["type"] == "content")
     assert tool_event["calls"][0]["arguments"] == {"sql": "SELECT 1"}
+    # The first turn has no prior context, but history must still be threaded
+    # through both model calls rather than dropped on the way.
+    # First turn has no prior context, but history is still threaded through.
+    assert observed_history == [[]]
     assert content_event["markdown"] == "A has 2 tests."
     with TestClient(app) as client:
         history = client.get(
@@ -384,7 +519,9 @@ async def test_stream_is_ordered_and_completes(
     assert history["total"] == 2
     assert history["items"][-1]["status"] == "COMPLETED"
     assert history["items"][-1]["a2ui_surface_snapshot"]["status"] == "COMPLETED"
-    assert observed_modes == [reasoning_enabled, reasoning_enabled, reasoning_enabled]
+    # Two model call sites now: the agent (planning and answering in one loop)
+    # and the visualization tool selection. Both must honour the toggle.
+    assert observed_modes == [reasoning_enabled, reasoning_enabled]
 
 
 def test_cancel_streaming_message(client: TestClient):
@@ -417,3 +554,347 @@ async def test_unconfigured_model_fails_instead_of_mocking(monkeypatch):
                 "question", {"answer": "This must never be returned as a mock."}
             )
         ]
+
+
+def test_legacy_database_drops_hardcoded_quality_score(tmp_path, monkeypatch):
+    """init_schema must migrate databases created before quality_score was removed."""
+    import duckdb
+
+    from backend.app import database
+
+    legacy_path = tmp_path / "legacy.duckdb"
+    legacy = duckdb.connect(str(legacy_path))
+    legacy.execute(
+        """
+        CREATE TABLE ingestion_batches (
+            batch_id VARCHAR PRIMARY KEY, source_type VARCHAR NOT NULL,
+            source_name VARCHAR NOT NULL, vendor_hint VARCHAR, status VARCHAR NOT NULL,
+            record_count INTEGER NOT NULL, quality_score DOUBLE NOT NULL,
+            current_stage VARCHAR, created_at TIMESTAMP NOT NULL, updated_at TIMESTAMP NOT NULL
+        )
+        """
+    )
+    legacy.execute(
+        "INSERT INTO ingestion_batches VALUES "
+        "('b1', 'CSV', 'legacy.csv', NULL, 'READY', 7, 86, 'Ready', now(), now())"
+    )
+    legacy.close()
+
+    monkeypatch.setattr(database, "DATABASE_PATH", legacy_path)
+    monkeypatch.setattr(database, "_database_connection", None)
+    database.init_schema()
+
+    with database.connection() as conn:
+        columns = [row[0] for row in conn.execute("DESCRIBE ingestion_batches").fetchall()]
+        assert "quality_score" not in columns
+        # Existing rows survive the migration and new inserts match the new arity.
+        conn.execute(
+            "INSERT INTO ingestion_batches VALUES "
+            "('b2', 'CSV', 'new.csv', NULL, 'READY', 3, 'Ready', now(), now())"
+        )
+        assert conn.execute("SELECT count(*) FROM ingestion_batches").fetchone()[0] == 2
+        conn.close()
+    database._database_connection = None
+
+
+def test_analysis_payload_carries_no_question_independent_metrics():
+    """The answer surface must not ship figures that ignore the user's question."""
+    from backend.app.analysis import _empty_analysis
+
+    payload = _empty_analysis("Which vendor?")
+    assert "kpis" not in payload
+    assert "insights" not in payload
+
+
+def test_conversations_persist_and_can_be_deleted(client: TestClient):
+    """The sidebar must survive a reload and let a conversation be removed."""
+    created = client.post("/api/v1/conversations").json()
+    conversation_id = created["conversation_id"]
+
+    listed = client.get("/api/v1/conversations").json()
+    entry = next(
+        item for item in listed["items"] if item["conversation_id"] == conversation_id
+    )
+    assert entry["title"] == "New analysis"
+    assert entry["question_count"] == 0
+
+    # Simulate a completed turn the way A2UIStream persists one.
+    with connection() as conn:
+        now = utcnow()
+        snapshot = {"events": [], "content": {"markdown": "done"}, "status": "COMPLETED"}
+        conn.execute(
+            "INSERT INTO messages VALUES (?, ?, 'USER', ?, 'COMPLETED', NULL, ?, ?)",
+            ["u1", conversation_id, "Which vendor is cheapest?", now, now],
+        )
+        conn.execute(
+            "INSERT INTO messages VALUES (?, ?, 'ASSISTANT', ?, 'COMPLETED', ?, ?, ?)",
+            ["a1", conversation_id, "done", json_dumps(snapshot), now, now],
+        )
+        conn.execute(
+            "INSERT INTO a2ui_events VALUES ('a1:1', 'a1', 1, '{}', ?)", [now]
+        )
+        conn.execute(
+            "UPDATE conversations SET title = ? WHERE conversation_id = ?",
+            ["Which vendor is cheapest?", conversation_id],
+        )
+
+    messages = client.get(f"/api/v1/conversations/{conversation_id}/messages").json()
+    assistant = next(item for item in messages["items"] if item["role"] == "ASSISTANT")
+    # A restored answer replays its snapshot instead of re-running the analysis.
+    replay = assistant["a2ui_replay"]
+    assert [next(iter(set(envelope) - {"version"})) for envelope in replay] == [
+        "createSurface", "updateComponents", "updateDataModel",
+    ]
+    assert replay[2]["updateDataModel"]["value"] == snapshot
+    assert replay[0]["createSurface"]["surfaceId"] == "message:a1"
+    user = next(item for item in messages["items"] if item["role"] == "USER")
+    assert user["a2ui_replay"] is None
+
+    reloaded = next(
+        item for item in client.get("/api/v1/conversations").json()["items"]
+        if item["conversation_id"] == conversation_id
+    )
+    assert reloaded["title"] == "Which vendor is cheapest?"
+    assert reloaded["question_count"] == 1
+
+    assert client.delete(f"/api/v1/conversations/{conversation_id}").status_code == 204
+    assert client.get(f"/api/v1/conversations/{conversation_id}/messages").status_code == 404
+    assert all(
+        item["conversation_id"] != conversation_id
+        for item in client.get("/api/v1/conversations").json()["items"]
+    )
+    with connection() as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM messages WHERE conversation_id = ?", [conversation_id]
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT count(*) FROM a2ui_events WHERE message_id = 'a1'"
+        ).fetchone()[0] == 0
+    assert client.delete(f"/api/v1/conversations/{conversation_id}").status_code == 404
+
+
+def test_conversation_history_is_sent_to_the_model(client: TestClient):
+    """A follow-up has nothing to resolve against unless earlier turns are sent."""
+    from backend.app.conversation import MAX_CHARS_PER_MESSAGE, recent_messages, with_history
+
+    conversation_id = client.post("/api/v1/conversations").json()["conversation_id"]
+    with connection() as conn:
+        base = utcnow()
+        rows = [
+            ("u1", "USER", "Compare cost by vendor", "COMPLETED", 0),
+            ("a1", "ASSISTANT", "DeltaLab is highest at $19,300.02.", "COMPLETED", 0),
+            ("u2", "USER", "Now only Ceramic-C", "COMPLETED", 1),
+            ("a2", "ASSISTANT", "", "STREAMING", 1),
+        ]
+        for message_id, role, content, status, offset in rows:
+            conn.execute(
+                "INSERT INTO messages VALUES (?, ?, ?, ?, ?, NULL, ?, NULL)",
+                [message_id, conversation_id, role, content, status,
+                 base.replace(microsecond=offset * 1000)],
+            )
+
+    history = recent_messages(conversation_id, "a2")
+    # The in-flight turn and its own question are excluded; earlier turns are not.
+    assert history == [
+        {"role": "user", "content": "Compare cost by vendor"},
+        {"role": "assistant", "content": "DeltaLab is highest at $19,300.02."},
+    ]
+
+    messages = with_history("SYSTEM", history, "Now only Ceramic-C")
+    assert [m["role"] for m in messages] == ["system", "user", "assistant", "user"]
+    assert messages[0]["content"] == "SYSTEM"
+    assert messages[-1]["content"] == "Now only Ceramic-C"
+
+    # An empty conversation still produces a well-formed two-message prompt.
+    assert with_history("SYSTEM", [], "Q") == [
+        {"role": "system", "content": "SYSTEM"},
+        {"role": "user", "content": "Q"},
+    ]
+
+    with connection() as conn:
+        conn.execute(
+            "UPDATE messages SET content = ?, status = 'COMPLETED' WHERE message_id = 'a2'",
+            ["x" * (MAX_CHARS_PER_MESSAGE + 500)],
+        )
+        conn.execute(
+            "INSERT INTO messages VALUES ('u3', ?, 'USER', 'And by month?', 'COMPLETED', "
+            "NULL, ?, NULL)",
+            [conversation_id, utcnow()],
+        )
+        conn.execute(
+            "INSERT INTO messages VALUES ('a3', ?, 'ASSISTANT', '', 'STREAMING', NULL, ?, NULL)",
+            [conversation_id, utcnow()],
+        )
+    clipped = next(m for m in recent_messages(conversation_id, "a3") if m["content"].startswith("x"))
+    assert len(clipped["content"]) == MAX_CHARS_PER_MESSAGE + 1  # includes the ellipsis
+
+    client.delete(f"/api/v1/conversations/{conversation_id}")
+
+
+def test_prompts_bound_history_to_context_not_figures():
+    assert "Earlier turns of this conversation" in SYSTEM_PROMPT
+    assert "Earlier turns of this conversation" in ANSWER_SYSTEM_PROMPT
+    assert "never from an\nearlier turn" in ANSWER_SYSTEM_PROMPT
+
+
+@pytest.mark.asyncio
+async def test_visualization_skips_cleanly_when_no_server_is_configured():
+    """An empty config disables charts visibly, without failing the analysis."""
+    events: list[dict] = []
+    analysis = {
+        "table": {"columns": ["vendor"], "rows": [{"vendor": "A"}]},
+        "visualization": {"status": "PENDING", "data": [{"vendor": "A"}]},
+    }
+    result = await McpVisualizationClient(servers=[]).render("q", analysis, events.append)
+
+    assert result["status"] == "SKIPPED"
+    assert result["asset_url"] is None
+    discovery = [event for event in events if event["tool_call_id"] == "mcp:tools/list"]
+    # The empty result is still reported, so this cannot be mistaken for a model
+    # that simply chose not to draw a chart.
+    assert [event["type"] for event in discovery] == ["tool_call", "tool_result"]
+    assert discovery[-1]["result"] == {"tool_count": 0, "servers": {}}
+
+
+def test_agent_query_tool_is_the_only_path_to_duckdb():
+    """The pipeline used to guarantee ordering; now the tool must guarantee it."""
+    from backend.app.agent import AnalysisRun, build_query_tool
+
+    run = AnalysisRun()
+    events: list[dict] = []
+    query = build_query_tool(run, events.append, None)
+
+    rejected = query.invoke({"sql": "DROP TABLE fact_test_results"})
+    assert rejected.startswith("REJECTED:")
+    # Rejection is returned, not raised, so the agent can repair and retry.
+    assert run.sql is None and run.rows == []
+    assert [e["status"] for e in events if e["tool_call_id"] == "sql_guard:1"] == [
+        "RUNNING", "FAILED",
+    ]
+
+    assert query.invoke({"sql": "SELECT * FROM read_csv('secret.csv')"}).startswith("REJECTED:")
+    assert query.invoke({"sql": "SELECT * FROM internal_users"}).startswith("REJECTED:")
+
+    ok = query.invoke({"sql": "SELECT vendor, count(*) AS test_count FROM fact_test_results GROUP BY vendor"})
+    assert json.loads(ok)
+    # The guarded AST, not the model's raw string, is what ran and what is shown.
+    assert run.sql.endswith("LIMIT 200")
+    assert "test_count" in run.columns
+    analysis = run.as_analysis()
+    assert analysis["visualization"]["status"] == "PENDING"
+    assert analysis["requires_clarification"] is False
+
+
+def test_skill_tools_are_scoped_and_execute_is_configurable(monkeypatch, tmp_path):
+    """Skills need file reads; the write and execute surface is a deliberate choice."""
+    from backend.app import skills
+
+    monkeypatch.setenv("SKILL_DIR", str(tmp_path))
+    assert skills.discovered_skills() == []
+    # No skills means no filesystem tools at all, rather than idle file access.
+    assert skills.skill_middleware() == []
+
+    skill = tmp_path / "vendor-scorecard"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text(
+        "---\nname: vendor-scorecard\ndescription: Ranks vendors.\n---\n\n# Rules\n"
+    )
+    assert skills.discovered_skills() == ["vendor-scorecard"]
+
+    monkeypatch.setenv("SKILL_EXECUTE_ENABLED", "true")
+    assert skills.execute_enabled() is True
+    assert "execute" in skills.allowed_tool_names()
+    filesystem, skills_mw = skills.skill_middleware()
+    names = {tool.name for tool in filesystem.tools}
+    assert "read_file" in names, "a skill body cannot be loaded without read_file"
+    assert "execute" in names
+    assert skills_mw.sources == ["./"]
+
+    monkeypatch.setenv("SKILL_EXECUTE_ENABLED", "false")
+    assert skills.execute_enabled() is False
+    filesystem, _ = skills.skill_middleware()
+    names = {tool.name for tool in filesystem.tools}
+    assert "execute" not in names
+    assert "read_file" in names
+
+
+@pytest.mark.asyncio
+async def test_tool_schemas_are_discovered_once_and_reused(monkeypatch):
+    """Starting a stdio server costs seconds, so schemas are cached per process."""
+    from backend.app import mcp_chart
+
+    monkeypatch.setattr(mcp_chart, "_TOOL_CACHE", None)
+    calls: list[int] = []
+
+    async def fake_discover(servers):
+        calls.append(len(servers))
+        tool = mcp_chart.DiscoveredTool(
+            server=servers[0],
+            schema={"type": "function", "function": {"name": "generate_bar_chart"}},
+        )
+        return {"generate_bar_chart": tool}, {servers[0].name: {"tool_count": 1}}
+
+    monkeypatch.setattr(mcp_chart, "discover_tools", fake_discover)
+    servers = enabled_servers()
+
+    tools, _, from_cache = await mcp_chart.cached_tools(servers)
+    assert set(tools) == {"generate_bar_chart"} and from_cache is False
+    # The allowlist still travels with the tool, now via its server.
+    assert tools["generate_bar_chart"].asset_hosts == ("mdn.alipayobjects.com",)
+
+    _, _, from_cache = await mcp_chart.cached_tools(servers)
+    assert from_cache is True
+    assert calls == [1], "discovery must not run again once cached"
+
+    await mcp_chart.cached_tools(servers, refresh=True)
+    assert calls == [1, 1], "refresh must re-discover"
+
+    monkeypatch.setattr(mcp_chart, "_TOOL_CACHE", None)
+
+    async def failing_discover(servers):
+        return {}, {servers[0].name: {"error": "OSError: npx missing"}}
+
+    monkeypatch.setattr(mcp_chart, "discover_tools", failing_discover)
+    _, report, _ = await mcp_chart.cached_tools(servers)
+    assert "error" in report[servers[0].name]
+    # A transient failure must not be cached, or charts stay dead for the
+    # lifetime of the process.
+    assert mcp_chart._TOOL_CACHE is None
+    assert "error" not in await mcp_chart.prime_tool_cache()  # returns the report, not a raise
+    monkeypatch.setattr(mcp_chart, "_TOOL_CACHE", None)
+
+
+def test_logs_rotate_and_stay_bounded(tmp_path, monkeypatch):
+    """Old logs must be deleted, or a long-running box fills its disk."""
+    import logging
+
+    from backend.app import logging_config
+
+    monkeypatch.setenv("LOG_DIR", str(tmp_path))
+    monkeypatch.setenv("LOG_MAX_BYTES", "2048")
+    monkeypatch.setenv("LOG_BACKUP_COUNT", "2")
+    monkeypatch.setattr(logging_config, "_configured", False)
+    previous = logging.getLogger().handlers[:]
+    try:
+        logging_config.configure_logging()
+        described = logging_config.describe()
+        # The bound the operator actually cares about.
+        assert described["max_total_bytes"] == 2048 * 3
+
+        logger = logging.getLogger("prism.test")
+        for index in range(400):
+            logger.info("filler line %s %s", index, "x" * 80)
+
+        written = sorted(tmp_path.glob("app.log*"))
+        assert len(written) == 3, "active file plus exactly backup_count older ones"
+        total = sum(path.stat().st_size for path in written)
+        assert total <= described["max_total_bytes"] * 1.1
+        # Rotation deletes rather than accumulates.
+        assert not (tmp_path / "app.log.3").exists()
+    finally:
+        logging.getLogger().handlers = previous
+        logging_config._configured = False
+
+    monkeypatch.setenv("LOG_MAX_BYTES", "0")
+    with pytest.raises(ValueError, match="LOG_MAX_BYTES"):
+        logging_config.max_bytes()

@@ -13,7 +13,6 @@ class IngestionBatch(BaseModel):
         "UPLOADED", "PROFILING", "MAPPING", "NEEDS_REVIEW", "COMMITTING", "READY", "FAILED"
     ]
     record_count: int = 0
-    quality_score: float = 0
     current_stage: str | None = None
     created_at: datetime
     updated_at: datetime
@@ -73,7 +72,8 @@ class A2UIClientCapabilities(BaseModel):
 
 class CreateMessageRequest(BaseModel):
     question: str = Field(min_length=1, max_length=1_000)
-    reasoningEnabled: bool = True
+    # Thinking is opt-in: it roughly triples latency, so the fast path is default.
+    reasoningEnabled: bool = False
     filters: dict[str, Any] = Field(default_factory=dict)
     a2uiClientCapabilities: A2UIClientCapabilities
 
