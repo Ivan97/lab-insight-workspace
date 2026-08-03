@@ -23,7 +23,8 @@
 .delete-conversation { position: absolute; top: 50%; right: 4px; transform: translateY(-50%); width: 22px; height: 22px; display: grid; place-items: center; border: 0; border-radius: 6px; color: #8b8b91; background: transparent; opacity: 0; cursor: pointer; }
 .conversation-subtab:hover > .delete-conversation, .delete-conversation:focus-visible { opacity: 1; }
 .delete-conversation:hover { color: #c0392b; background: #fdecea; }
-.delete-conversation:disabled { opacity: 0; cursor: default; }
+.delete-conversation:disabled,
+.conversation-subtab:hover > .delete-conversation:disabled { opacity: .32; cursor: not-allowed; }
 .conversation-subtabs strong, .conversation-subtabs small { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .conversation-subtabs strong { align-self: end; font-size: 10px; font-weight: 650; }
 .conversation-subtabs small { grid-column: 2; color: #8b8b91; font-size: 9px; }
